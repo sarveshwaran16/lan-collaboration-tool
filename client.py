@@ -96,7 +96,7 @@ class ConferenceClient:
         self.chat_btn = tk.Button(control_frame, text="Chat", command=self.open_chat, width=12, bg='#9C27B0', fg='white')
         self.chat_btn.pack(side=tk.LEFT, padx=2)
         
-        self.file_btn = tk.Button(control_frame, text="Send File", command=self.open_file_transfer, width=12, bg='#607D8B', fg='white')
+        self.file_btn = tk.Button(control_frame, text="Share File", command=self.open_file_transfer, width=12, bg='#607D8B', fg='white')
         self.file_btn.pack(side=tk.LEFT, padx=2)
         
         # Right panel - Participants
@@ -149,9 +149,9 @@ class ConferenceClient:
                 self.stream_out = self.audio_out.open(
                     format=pyaudio.paInt16,
                     channels=1,
-                    rate=44100,
+                    rate=16000,  # Match input rate
                     output=True,
-                    frames_per_buffer=1024
+                    frames_per_buffer=2048  # Match input buffer
                 )
             except Exception as e:
                 print(f"Audio output setup error: {e}")
@@ -376,9 +376,10 @@ class ConferenceClient:
                 self.stream_in = self.audio_in.open(
                     format=pyaudio.paInt16,
                     channels=1,
-                    rate=44100,
+                    rate=16000,  # Reduced from 44100 for better network performance
                     input=True,
-                    frames_per_buffer=1024
+                    frames_per_buffer=2048,  # Increased buffer size
+                    input_device_index=None
                 )
                 
                 self.audio_enabled = True
@@ -461,7 +462,7 @@ class ConferenceClient:
         """Send audio frames via UDP"""
         while self.audio_enabled and self.running:
             try:
-                data = self.stream_in.read(1024, exception_on_overflow=False)
+                data = self.stream_in.read(2048, exception_on_overflow=False)
                 audio_data = base64.b64encode(data).decode('utf-8')
                 
                 message = json.dumps({
@@ -471,7 +472,7 @@ class ConferenceClient:
                 })
                 
                 self.udp_socket.sendto(message.encode('utf-8'), (self.server_host, self.udp_port))
-                time.sleep(0.02)
+                time.sleep(0.05)  # Match buffer timing
             except Exception as e:
                 print(f"Audio send error: {e}")
                 break
@@ -689,15 +690,36 @@ class ConferenceClient:
                 print(f"Error updating chat window: {e}")
                     
     def open_file_transfer(self):
-        file_window = tk.Toplevel(self.root)
-        file_window.title("File Transfer")
-        file_window.geometry("450x350")
+        # Directly open file browser
+        filepath = filedialog.askopenfilename(title="Select file to share")
+        if not filepath:
+            return
         
-        tk.Label(file_window, text="Send file to:", font=('Arial', 11, 'bold')).pack(pady=10)
+        # Check file size
+        try:
+            import os
+            file_size = os.path.getsize(filepath)
+            if file_size > 10 * 1024 * 1024:
+                messagebox.showwarning("Warning", "File too large! Maximum 10MB")
+                return
+        except:
+            pass
+        
+        # Show recipient selection dialog
+        file_window = tk.Toplevel(self.root)
+        file_window.title("Send File")
+        file_window.geometry("400x250")
+        file_window.transient(self.root)
+        file_window.grab_set()
+        
+        filename = filepath.split('/')[-1] if '/' in filepath else filepath.split('\\')[-1]
+        
+        tk.Label(file_window, text=f"File: {filename}", font=('Arial', 11, 'bold'), wraplength=350).pack(pady=15)
+        tk.Label(file_window, text="Send to:", font=('Arial', 10, 'bold')).pack(pady=5)
         
         recipient_var = tk.StringVar(value="everyone")
         recipient_frame = tk.Frame(file_window)
-        recipient_frame.pack(pady=5)
+        recipient_frame.pack(pady=10)
         
         tk.Radiobutton(recipient_frame, text="Everyone", variable=recipient_var, value="everyone", font=('Arial', 10)).pack(anchor='w', padx=20)
         
@@ -705,48 +727,31 @@ class ConferenceClient:
             if username != self.username:
                 tk.Radiobutton(recipient_frame, text=username, variable=recipient_var, value=username, font=('Arial', 10)).pack(anchor='w', padx=20)
         
-        selected_file = tk.StringVar(value="No file selected")
-        tk.Label(file_window, textvariable=selected_file, wraplength=400, font=('Arial', 10)).pack(pady=15)
-        
-        file_path = {'path': None}
-        
-        def select_file():
-            filepath = filedialog.askopenfilename()
-            if filepath:
-                file_path['path'] = filepath
-                filename = filepath.split('/')[-1] if '/' in filepath else filepath.split('\\')[-1]
-                selected_file.set(filename)
-        
         def send_file():
-            if file_path['path']:
-                try:
-                    with open(file_path['path'], 'rb') as f:
-                        file_data = f.read()
-                    
-                    if len(file_data) > 10 * 1024 * 1024:
-                        messagebox.showwarning("Warning", "File too large! Maximum 10MB")
-                        return
-                    
-                    file_data_b64 = base64.b64encode(file_data).decode('utf-8')
-                    filename = file_path['path'].split('/')[-1] if '/' in file_path['path'] else file_path['path'].split('\\')[-1]
-                    
-                    message = json.dumps({
-                        'type': 'file_transfer',
-                        'recipient': recipient_var.get(),
-                        'filename': filename,
-                        'data': file_data_b64
-                    })
-                    
-                    self.tcp_socket.send(message.encode('utf-8'))
-                    messagebox.showinfo("Success", "File sent successfully!")
-                    file_window.destroy()
-                except Exception as e:
-                    messagebox.showerror("Error", f"Could not send file:\n{e}")
-            else:
-                messagebox.showwarning("Warning", "Please select a file first")
+            try:
+                with open(filepath, 'rb') as f:
+                    file_data = f.read()
+                
+                file_data_b64 = base64.b64encode(file_data).decode('utf-8')
+                
+                message = json.dumps({
+                    'type': 'file_transfer',
+                    'recipient': recipient_var.get(),
+                    'filename': filename,
+                    'data': file_data_b64
+                })
+                
+                self.tcp_socket.send(message.encode('utf-8'))
+                messagebox.showinfo("Success", "File sent successfully!")
+                file_window.destroy()
+            except Exception as e:
+                messagebox.showerror("Error", f"Could not send file:\n{e}")
         
-        tk.Button(file_window, text="Select File", command=select_file, width=20, bg='#2196F3', fg='white', font=('Arial', 10, 'bold')).pack(pady=10)
-        tk.Button(file_window, text="Send File", command=send_file, width=20, bg='#4CAF50', fg='white', font=('Arial', 10, 'bold')).pack(pady=10)
+        button_frame = tk.Frame(file_window)
+        button_frame.pack(pady=15)
+        
+        tk.Button(button_frame, text="Send", command=send_file, width=12, bg='#4CAF50', fg='white', font=('Arial', 10, 'bold')).pack(side=tk.LEFT, padx=5)
+        tk.Button(button_frame, text="Cancel", command=file_window.destroy, width=12, bg='#f44336', fg='white', font=('Arial', 10, 'bold')).pack(side=tk.LEFT, padx=5)
         
     def handle_file_transfer(self, message):
         from_user = message.get('from', 'Unknown')

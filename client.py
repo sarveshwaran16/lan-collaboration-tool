@@ -14,9 +14,13 @@ from mss import mss
 class ConferenceClient:
     def __init__(self, server_host, server_port, username):
         self.server_host = server_host
-        self.server_port = server_port
+        self.tcp_port = server_port
+        self.udp_port = None
         self.username = username
-        self.socket = None
+        
+        # Sockets
+        self.tcp_socket = None
+        self.udp_socket = None
         self.running = False
         
         # Media flags
@@ -38,6 +42,7 @@ class ConferenceClient:
         self.current_page = 0
         self.participants_per_page = 10
         self.chat_windows = []
+        self.chat_history = []  # Store all chat messages
         
         # GUI setup
         self.root = tk.Tk()
@@ -115,12 +120,26 @@ class ConferenceClient:
         
     def connect(self):
         try:
-            self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.socket.connect((self.server_host, self.server_port))
+            # Connect TCP
+            self.tcp_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.tcp_socket.connect((self.server_host, self.tcp_port))
             
             # Send username
             message = json.dumps({'username': self.username})
-            self.socket.send(message.encode('utf-8'))
+            self.tcp_socket.send(message.encode('utf-8'))
+            
+            # Receive UDP port info
+            data = self.tcp_socket.recv(4096).decode('utf-8')
+            msg = json.loads(data)
+            self.udp_port = msg.get('udp_port', 5556)
+            
+            # Create UDP socket
+            self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.udp_socket.bind(('', 0))  # Bind to any available port
+            
+            # Register with server via UDP
+            register_msg = json.dumps({'type': 'register', 'username': self.username})
+            self.udp_socket.sendto(register_msg.encode('utf-8'), (self.server_host, self.udp_port))
             
             self.running = True
             
@@ -137,21 +156,26 @@ class ConferenceClient:
             except Exception as e:
                 print(f"Audio output setup error: {e}")
             
-            # Start receiver thread
-            receiver_thread = threading.Thread(target=self.receive_messages)
-            receiver_thread.daemon = True
-            receiver_thread.start()
+            # Start receiver threads
+            tcp_thread = threading.Thread(target=self.receive_tcp)
+            tcp_thread.daemon = True
+            tcp_thread.start()
+            
+            udp_thread = threading.Thread(target=self.receive_udp)
+            udp_thread.daemon = True
+            udp_thread.start()
             
             return True
         except Exception as e:
             messagebox.showerror("Connection Error", f"Could not connect to server:\n{e}")
             return False
             
-    def receive_messages(self):
+    def receive_tcp(self):
+        """Receive TCP messages (chat, files, control)"""
         buffer = ""
         while self.running:
             try:
-                data = self.socket.recv(131072)
+                data = self.tcp_socket.recv(65536)
                 if not data:
                     break
                 
@@ -166,12 +190,6 @@ class ConferenceClient:
                         
                         if msg_type == 'participant_list':
                             self.root.after(0, self.update_participant_list, message['participants'])
-                        elif msg_type == 'video_frame':
-                            self.handle_video_frame(message)
-                        elif msg_type == 'audio_frame':
-                            self.handle_audio_frame(message)
-                        elif msg_type == 'screen_share':
-                            self.root.after(0, self.handle_screen_share, message)
                         elif msg_type == 'chat':
                             self.root.after(0, self.handle_chat_message, message)
                         elif msg_type == 'file_transfer':
@@ -182,9 +200,30 @@ class ConferenceClient:
                         
             except Exception as e:
                 if self.running:
-                    print(f"Receive error: {e}")
+                    print(f"TCP receive error: {e}")
                 break
+    
+    def receive_udp(self):
+        """Receive UDP messages (video, audio, screen share)"""
+        while self.running:
+            try:
+                data, addr = self.udp_socket.recvfrom(65536)
+                message = json.loads(data.decode('utf-8'))
+                msg_type = message.get('type')
                 
+                if msg_type == 'video_frame':
+                    self.handle_video_frame(message)
+                elif msg_type == 'audio_frame':
+                    self.handle_audio_frame(message)
+                elif msg_type == 'screen_share':
+                    self.root.after(0, self.handle_screen_share, message)
+                    
+            except json.JSONDecodeError:
+                continue
+            except Exception as e:
+                if self.running:
+                    print(f"UDP receive error: {e}")
+                    
     def update_participant_list(self, participants):
         for p in participants:
             username = p['username']
@@ -310,7 +349,7 @@ class ConferenceClient:
                     self.participants[self.username]['video'] = True
                 
                 message = json.dumps({'type': 'status_update', 'video': True})
-                self.socket.send(message.encode('utf-8'))
+                self.tcp_socket.send(message.encode('utf-8'))
                 
                 video_thread = threading.Thread(target=self.send_video)
                 video_thread.daemon = True
@@ -328,7 +367,7 @@ class ConferenceClient:
                 self.participants[self.username]['video'] = False
             
             message = json.dumps({'type': 'status_update', 'video': False})
-            self.socket.send(message.encode('utf-8'))
+            self.tcp_socket.send(message.encode('utf-8'))
             
     def toggle_audio(self):
         if not self.audio_enabled:
@@ -351,7 +390,7 @@ class ConferenceClient:
                     self.participants[self.username]['audio'] = True
                 
                 message = json.dumps({'type': 'status_update', 'audio': True})
-                self.socket.send(message.encode('utf-8'))
+                self.tcp_socket.send(message.encode('utf-8'))
                 
                 audio_thread = threading.Thread(target=self.send_audio)
                 audio_thread.daemon = True
@@ -372,15 +411,15 @@ class ConferenceClient:
                 self.participants[self.username]['audio'] = False
             
             message = json.dumps({'type': 'status_update', 'audio': False})
-            self.socket.send(message.encode('utf-8'))
+            self.tcp_socket.send(message.encode('utf-8'))
             
     def toggle_screen_share(self):
         if not self.screen_share_enabled:
             self.screen_share_enabled = True
             self.screen_btn.config(text="Stop Sharing", bg='#f44336')
             
-            message = json.dumps({'type': 'screen_share', 'action': 'start'})
-            self.socket.send(message.encode('utf-8'))
+            message = json.dumps({'type': 'screen_share', 'action': 'start', 'username': self.username})
+            self.udp_socket.sendto(message.encode('utf-8'), (self.server_host, self.udp_port))
             
             screen_thread = threading.Thread(target=self.send_screen_share)
             screen_thread.daemon = True
@@ -389,10 +428,11 @@ class ConferenceClient:
             self.screen_share_enabled = False
             self.screen_btn.config(text="Share Screen", bg='#FF9800')
             
-            message = json.dumps({'type': 'screen_share', 'action': 'stop'})
-            self.socket.send(message.encode('utf-8'))
+            message = json.dumps({'type': 'screen_share', 'action': 'stop', 'username': self.username})
+            self.udp_socket.sendto(message.encode('utf-8'), (self.server_host, self.udp_port))
             
     def send_video(self):
+        """Send video frames via UDP"""
         while self.video_enabled and self.running:
             try:
                 ret, frame = self.cap.read()
@@ -405,18 +445,20 @@ class ConferenceClient:
                     
                     message = json.dumps({
                         'type': 'video_frame',
+                        'username': self.username,
                         'frame': frame_data
                     })
                     
-                    self.socket.send(message.encode('utf-8'))
+                    self.udp_socket.sendto(message.encode('utf-8'), (self.server_host, self.udp_port))
                     self.root.after(0, self.update_video_frame, self.username, frame)
                     
-                time.sleep(0.033)
+                time.sleep(0.033)  # ~30 FPS
             except Exception as e:
-                print(f"Video error: {e}")
+                print(f"Video send error: {e}")
                 break
                 
     def send_audio(self):
+        """Send audio frames via UDP"""
         while self.audio_enabled and self.running:
             try:
                 data = self.stream_in.read(1024, exception_on_overflow=False)
@@ -424,16 +466,18 @@ class ConferenceClient:
                 
                 message = json.dumps({
                     'type': 'audio_frame',
+                    'username': self.username,
                     'audio': audio_data
                 })
                 
-                self.socket.send(message.encode('utf-8'))
+                self.udp_socket.sendto(message.encode('utf-8'), (self.server_host, self.udp_port))
                 time.sleep(0.02)
             except Exception as e:
-                print(f"Audio error: {e}")
+                print(f"Audio send error: {e}")
                 break
                 
     def send_screen_share(self):
+        """Send screen share via UDP"""
         try:
             with mss() as sct:
                 monitor = sct.monitors[1]
@@ -451,11 +495,12 @@ class ConferenceClient:
                         message = json.dumps({
                             'type': 'screen_share',
                             'action': 'frame',
+                            'username': self.username,
                             'frame': frame_data
                         })
                         
-                        self.socket.send(message.encode('utf-8'))
-                        time.sleep(0.1)
+                        self.udp_socket.sendto(message.encode('utf-8'), (self.server_host, self.udp_port))
+                        time.sleep(0.1)  # 10 FPS
                     except Exception as e:
                         print(f"Screen share error: {e}")
                         break
@@ -572,11 +617,19 @@ class ConferenceClient:
         chat_display = scrolledtext.ScrolledText(chat_window, height=20, state='disabled', wrap=tk.WORD, font=('Arial', 10))
         chat_display.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         
+        # Load chat history into this window
+        chat_display.config(state='normal')
+        for msg in self.chat_history:
+            chat_display.insert(tk.END, msg)
+        chat_display.config(state='disabled')
+        chat_display.see(tk.END)
+        
         message_frame = tk.Frame(chat_window)
         message_frame.pack(fill=tk.X, padx=10, pady=(0, 10))
         
         message_entry = tk.Entry(message_frame, font=('Arial', 10))
         message_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
+        message_entry.focus_set()
         
         def send_chat():
             msg = message_entry.get().strip()
@@ -588,7 +641,7 @@ class ConferenceClient:
                     'message': msg
                 })
                 try:
-                    self.socket.send(message.encode('utf-8'))
+                    self.tcp_socket.send(message.encode('utf-8'))
                     message_entry.delete(0, tk.END)
                 except Exception as e:
                     messagebox.showerror("Error", f"Could not send message:\n{e}")
@@ -610,18 +663,30 @@ class ConferenceClient:
     def handle_chat_message(self, message):
         from_user = message.get('from', 'Unknown')
         msg_text = message.get('message', '')
+        recipient = message.get('recipient', 'everyone')
         timestamp = time.strftime('%H:%M:%S', time.localtime(message.get('timestamp', time.time())))
         
-        chat_msg = f"[{timestamp}] {from_user}: {msg_text}\n"
+        # Format message
+        if recipient == 'everyone':
+            chat_msg = f"[{timestamp}] {from_user}: {msg_text}\n"
+        else:
+            if from_user == self.username:
+                chat_msg = f"[{timestamp}] You (to {recipient}): {msg_text}\n"
+            else:
+                chat_msg = f"[{timestamp}] {from_user} (private): {msg_text}\n"
         
+        # Store in history
+        self.chat_history.append(chat_msg)
+        
+        # Update all open chat windows
         for chat_display in self.chat_windows:
             try:
                 chat_display.config(state='normal')
                 chat_display.insert(tk.END, chat_msg)
                 chat_display.config(state='disabled')
                 chat_display.see(tk.END)
-            except:
-                pass
+            except Exception as e:
+                print(f"Error updating chat window: {e}")
                     
     def open_file_transfer(self):
         file_window = tk.Toplevel(self.root)
@@ -672,7 +737,7 @@ class ConferenceClient:
                         'data': file_data_b64
                     })
                     
-                    self.socket.send(message.encode('utf-8'))
+                    self.tcp_socket.send(message.encode('utf-8'))
                     messagebox.showinfo("Success", "File sent successfully!")
                     file_window.destroy()
                 except Exception as e:
@@ -733,9 +798,15 @@ class ConferenceClient:
             except:
                 pass
         
-        if self.socket:
+        if self.tcp_socket:
             try:
-                self.socket.close()
+                self.tcp_socket.close()
+            except:
+                pass
+        
+        if self.udp_socket:
+            try:
+                self.udp_socket.close()
             except:
                 pass
         

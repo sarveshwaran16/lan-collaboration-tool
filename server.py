@@ -50,7 +50,7 @@ class ConferenceServer:
         """Handle all UDP media packets"""
         while self.running:
             try:
-                data, addr = self.udp_socket.recvfrom(65536)
+                data, addr = self.udp_socket.recvfrom(131072)  # Increased buffer
                 message = json.loads(data.decode('utf-8'))
                 msg_type = message.get('type')
                 username = message.get('username')
@@ -60,9 +60,19 @@ class ConferenceServer:
                     with self.lock:
                         self.username_to_udp[username] = addr
                 
-                # Broadcast to all other clients
-                if msg_type in ['video_frame', 'audio_frame', 'screen_share']:
-                    self.broadcast_udp(data, addr, username)
+                # Broadcast based on type
+                if msg_type in ['video_frame', 'audio_frame']:
+                    # Video and audio - don't send back to sender
+                    self.broadcast_udp_exclude_sender(data, addr, username)
+                elif msg_type == 'screen_share':
+                    # Screen share - send to everyone including sender
+                    action = message.get('action')
+                    if action == 'frame':
+                        # For frames, exclude sender (they have their own copy)
+                        self.broadcast_udp_exclude_sender(data, addr, username)
+                    else:
+                        # For start/stop, send to everyone
+                        self.broadcast_udp_all(data, username)
                     
             except json.JSONDecodeError:
                 continue
@@ -70,15 +80,24 @@ class ConferenceServer:
                 if self.running:
                     print(f"UDP error: {e}")
     
-    def broadcast_udp(self, data, sender_addr, sender_username):
+    def broadcast_udp_exclude_sender(self, data, sender_addr, sender_username):
         """Broadcast UDP packet to all clients except sender"""
         with self.lock:
-            for username, udp_addr in self.username_to_udp.items():
-                if username != sender_username and udp_addr != sender_addr:
+            for username, udp_addr in list(self.username_to_udp.items()):
+                if username != sender_username:
                     try:
                         self.udp_socket.sendto(data, udp_addr)
                     except Exception as e:
                         print(f"Error sending UDP to {username}: {e}")
+    
+    def broadcast_udp_all(self, data, sender_username):
+        """Broadcast UDP packet to all clients including sender"""
+        with self.lock:
+            for username, udp_addr in list(self.username_to_udp.items()):
+                try:
+                    self.udp_socket.sendto(data, udp_addr)
+                except Exception as e:
+                    print(f"Error sending UDP to {username}: {e}")
                 
     def handle_tcp_client(self, client_socket, address):
         username = None

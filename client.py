@@ -64,10 +64,6 @@ class ConferenceClient:
         self.video_frame.pack(fill=tk.BOTH, expand=True)
         self.video_frame.pack_propagate(False)
         
-        # Screen share widgets
-        self.screen_share_label = None
-        self.screen_share_info = None
-        
         # Navigation
         nav_frame = tk.Frame(left_frame)
         nav_frame.pack(fill=tk.X, pady=(5, 0))
@@ -118,6 +114,8 @@ class ConferenceClient:
         scrollbar.config(command=self.participant_listbox.yview)
         
         self.video_labels = {}
+        self.screen_share_label = None
+        self.screen_share_info = None
         
     def connect(self):
         try:
@@ -134,8 +132,9 @@ class ConferenceClient:
             msg = json.loads(data)
             self.udp_port = msg.get('udp_port', 5556)
             
-            # Create UDP socket
+            # Create UDP socket with larger buffer
             self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 2097152)  # 2MB buffer
             self.udp_socket.bind(('', 0))
             
             # Register with server via UDP
@@ -205,10 +204,10 @@ class ConferenceClient:
                 break
     
     def receive_udp(self):
-        """Receive UDP messages (video, audio, screen share)"""
+        """Receive UDP messages - OPTIMIZED"""
         while self.running:
             try:
-                data, addr = self.udp_socket.recvfrom(65536)
+                data, addr = self.udp_socket.recvfrom(131072)  # Large buffer for screen share
                 message = json.loads(data.decode('utf-8'))
                 msg_type = message.get('type')
                 
@@ -217,13 +216,53 @@ class ConferenceClient:
                 elif msg_type == 'audio_frame':
                     self.handle_audio_frame(message)
                 elif msg_type == 'screen_share':
-                    self.root.after(0, self.handle_screen_share, message)
+                    action = message.get('action')
+                    username = message.get('username')
+                    
+                    if action == 'start':
+                        self.root.after(0, self.handle_screen_share_start, username)
+                    elif action == 'stop':
+                        self.root.after(0, self.handle_screen_share_stop)
+                    elif action == 'frame':
+                        self.handle_screen_share_frame(message)
                     
             except json.JSONDecodeError:
                 continue
             except Exception as e:
                 if self.running:
                     print(f"UDP receive error: {e}")
+    
+    def handle_screen_share_start(self, username):
+        """Handle screen share start from others"""
+        if username == self.username:
+            return  # Ignore own start message
+            
+        self.screen_share_active = True
+        self.screen_share_user = username
+        self.current_page = 0
+        self.shared_screen_frame = None
+        self.display_screen_share()
+    
+    def handle_screen_share_stop(self):
+        """Handle screen share stop"""
+        self.screen_share_active = False
+        self.screen_share_user = None
+        self.shared_screen_frame = None
+        self.current_page = 0
+        self.hide_screen_share()
+    
+    def handle_screen_share_frame(self, message):
+        """Handle incoming screen share frame"""
+        try:
+            frame_data = base64.b64decode(message['frame'])
+            frame = cv2.imdecode(np.frombuffer(frame_data, np.uint8), cv2.IMREAD_COLOR)
+            self.shared_screen_frame = frame
+            
+            # Update display if on screen share page
+            if self.current_page == 0 and self.screen_share_active:
+                self.root.after(0, self.update_screen_share_display)
+        except Exception as e:
+            print(f"Screen frame error: {e}")
                     
     def update_participant_list(self, participants):
         for p in participants:
@@ -253,41 +292,25 @@ class ConferenceClient:
                 status += "🎤 "
             self.participant_listbox.insert(tk.END, f"{username} {status}")
         
-        print(f"[{self.username}] Participant list updated. Screen share active: {self.screen_share_active}, Current page: {self.current_page}")
-        
-        # CRITICAL: Only update display if NOT on screen share page
-        if self.screen_share_active and self.current_page == 0:
-            # On screen share page, don't rebuild - prevents mirroring
-            print(f"[{self.username}] Skipping display update - on screen share page")
-            pass
-        else:
-            # On participant pages or no screen share, safe to update
-            print(f"[{self.username}] Updating video display")
+        # Only update display if not on screen share page
+        if not (self.screen_share_active and self.current_page == 0):
             self.update_video_display()
         
     def update_video_display(self):
         """Display participant video grid"""
-        # Clear existing displays
         for widget in self.video_frame.winfo_children():
             widget.destroy()
         self.video_labels.clear()
         
-        # Reset screen share widget references
-        self.screen_share_label = None
-        self.screen_share_info = None
-        
         participant_list = list(self.participants.keys())
         
-        # Adjust pagination if screen share is active
+        # Calculate page based on screen share status
         if self.screen_share_active:
-            # Page 0 = screen share, pages 1+ = participants
             if self.current_page == 0:
-                # Should not call this function on page 0 during screen share
-                return
+                return  # Don't rebuild on screen share page
             participant_page = self.current_page - 1
             total_pages = 1 + max(1, (len(participant_list) - 1) // self.participants_per_page + 1)
         else:
-            # Normal mode: all pages show participants
             participant_page = self.current_page
             total_pages = max(1, (len(participant_list) - 1) // self.participants_per_page + 1)
         
@@ -341,7 +364,7 @@ class ConferenceClient:
                 'cell_frame': cell_frame
             }
             
-            # Display existing frame if available
+            # Display existing frame
             if participant_data['frame'] is not None:
                 self.update_video_frame(username, participant_data['frame'])
         
@@ -352,11 +375,76 @@ class ConferenceClient:
         
         self.page_label.config(text=f"Page {self.current_page + 1}/{total_pages}")
         
+    def display_screen_share(self):
+        """Display screen share on page 0"""
+        for widget in self.video_frame.winfo_children():
+            widget.destroy()
+        self.video_labels.clear()
+        
+        self.screen_share_info = tk.Label(
+            self.video_frame, 
+            text=f"🖥️ Screen shared by: {self.screen_share_user}", 
+            fg='white', 
+            bg='#1a1a1a', 
+            font=('Arial', 14, 'bold'), 
+            pady=10
+        )
+        self.screen_share_info.pack(side=tk.TOP, fill=tk.X)
+        
+        self.screen_share_label = tk.Label(
+            self.video_frame, 
+            bg='black', 
+            text="Loading screen share...", 
+            fg='gray', 
+            font=('Arial', 16)
+        )
+        self.screen_share_label.pack(fill=tk.BOTH, expand=True)
+        
+        # Display frame if available
+        if self.shared_screen_frame is not None:
+            self.update_screen_share_display()
+        
+        # Update page label
+        participant_list = list(self.participants.keys())
+        total_pages = 1 + max(1, (len(participant_list) - 1) // self.participants_per_page + 1)
+        self.page_label.config(text=f"Page 1/{total_pages} - Screen Share")
+    
+    def hide_screen_share(self):
+        """Hide screen share and return to participants"""
+        if self.screen_share_label and self.screen_share_label.winfo_exists():
+            self.screen_share_label.destroy()
+        if self.screen_share_info and self.screen_share_info.winfo_exists():
+            self.screen_share_info.destroy()
+        
+        self.screen_share_label = None
+        self.screen_share_info = None
+        self.update_video_display()
+    
+    def update_screen_share_display(self):
+        """Update screen share frame"""
+        try:
+            if not self.screen_share_label or not self.screen_share_label.winfo_exists():
+                return
+            if not self.shared_screen_frame is not None:
+                return
+                
+            frame_rgb = cv2.cvtColor(self.shared_screen_frame, cv2.COLOR_BGR2RGB)
+            img = Image.fromarray(frame_rgb)
+            
+            frame_width = max(self.video_frame.winfo_width() - 20, 100)
+            frame_height = max(self.video_frame.winfo_height() - 80, 100)
+            
+            img.thumbnail((frame_width, frame_height), Image.Resampling.LANCZOS)
+            
+            photo = ImageTk.PhotoImage(img)
+            self.screen_share_label.config(image=photo, text="")
+            self.screen_share_label.image = photo
+        except Exception as e:
+            print(f"Screen display error: {e}")
+        
     def prev_page(self):
         if self.current_page > 0:
             self.current_page -= 1
-            
-            # Check if we need to display screen share or participants
             if self.screen_share_active and self.current_page == 0:
                 self.display_screen_share()
             else:
@@ -418,8 +506,7 @@ class ConferenceClient:
                     channels=1,
                     rate=16000,
                     input=True,
-                    frames_per_buffer=2048,
-                    input_device_index=None
+                    frames_per_buffer=2048
                 )
                 
                 self.audio_enabled = True
@@ -459,21 +546,17 @@ class ConferenceClient:
             self.screen_share_enabled = True
             self.screen_btn.config(text="Stop Sharing", bg='#f44336')
             
-            # CRITICAL: Set screen share state BEFORE sending message
+            # Set state immediately for sender
             self.screen_share_active = True
             self.screen_share_user = self.username
             self.current_page = 0
-            self.shared_screen_frame = None
-            
-            # Display screen share mode immediately for self
             self.display_screen_share()
-            print(f"[{self.username}] Starting screen share - displaying on page 0")
             
-            # Send start message to server (will broadcast to others)
+            # Send start message
             message = json.dumps({'type': 'screen_share', 'action': 'start', 'username': self.username})
             self.udp_socket.sendto(message.encode('utf-8'), (self.server_host, self.udp_port))
             
-            # Start screen capture thread
+            # Start capture
             screen_thread = threading.Thread(target=self.send_screen_share)
             screen_thread.daemon = True
             screen_thread.start()
@@ -481,20 +564,19 @@ class ConferenceClient:
             self.screen_share_enabled = False
             self.screen_btn.config(text="Share Screen", bg='#FF9800')
             
-            # Send stop message to server
+            # Send stop message
             message = json.dumps({'type': 'screen_share', 'action': 'stop', 'username': self.username})
             self.udp_socket.sendto(message.encode('utf-8'), (self.server_host, self.udp_port))
             
-            # Clean up local state
+            # Clean up
             self.screen_share_active = False
             self.screen_share_user = None
             self.shared_screen_frame = None
             self.current_page = 0
-            self.hide_screen_share_mode()
-            print(f"[{self.username}] Stopped screen share")
+            self.hide_screen_share()
             
     def send_video(self):
-        """Send video frames via UDP"""
+        """Send video - OPTIMIZED"""
         while self.video_enabled and self.running:
             try:
                 ret, frame = self.cap.read()
@@ -514,13 +596,13 @@ class ConferenceClient:
                     self.udp_socket.sendto(message.encode('utf-8'), (self.server_host, self.udp_port))
                     self.root.after(0, self.update_video_frame, self.username, frame)
                     
-                time.sleep(0.033)  # ~30 FPS
+                time.sleep(0.033)
             except Exception as e:
-                print(f"Video send error: {e}")
+                print(f"Video error: {e}")
                 break
                 
     def send_audio(self):
-        """Send audio frames via UDP"""
+        """Send audio - OPTIMIZED"""
         while self.audio_enabled and self.running:
             try:
                 data = self.stream_in.read(2048, exception_on_overflow=False)
@@ -535,37 +617,30 @@ class ConferenceClient:
                 self.udp_socket.sendto(message.encode('utf-8'), (self.server_host, self.udp_port))
                 time.sleep(0.05)
             except Exception as e:
-                print(f"Audio send error: {e}")
+                print(f"Audio error: {e}")
                 break
                 
     def send_screen_share(self):
-        """Send screen share via UDP - FIXED for packet size"""
-        print(f"[{self.username}] Screen share capture thread started")
+        """Send screen share - OPTIMIZED for low latency"""
         try:
             with mss() as sct:
                 monitor = sct.monitors[1]
-                frame_count = 0
                 
                 while self.screen_share_enabled and self.running:
                     try:
+                        # Capture screen
                         screenshot = sct.grab(monitor)
                         frame = np.array(screenshot)
                         frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
-                        frame = cv2.resize(frame, (800, 600))
+                        frame = cv2.resize(frame, (960, 540))  # 540p for balance
                         
-                        # Store locally for own display
+                        # Store for own display
                         self.shared_screen_frame = frame.copy()
+                        if self.current_page == 0:
+                            self.root.after(0, self.update_screen_share_display)
                         
-                        # Update own screen share display if on page 0
-                        if self.current_page == 0 and self.screen_share_active:
-                            self.root.after(0, self.update_screen_share_frame, frame.copy())
-                        
-                        frame_count += 1
-                        if frame_count % 10 == 0:  # Log every 10 frames
-                            print(f"[{self.username}] Captured {frame_count} frames, current_page={self.current_page}")
-                        
-                        # Encode and send to server
-                        _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 30])
+                        # Encode with lower quality for speed
+                        _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 40])
                         frame_data = base64.b64encode(buffer).decode('utf-8')
                         
                         message = json.dumps({
@@ -575,21 +650,20 @@ class ConferenceClient:
                             'frame': frame_data
                         })
                         
+                        # Check packet size
                         msg_size = len(message.encode('utf-8'))
-                        if msg_size > 60000:
-                            print(f"[{self.username}] Warning: Packet size {msg_size} bytes - too large!")
-                            continue
+                        if msg_size > 65000:
+                            print(f"Warning: Large packet {msg_size} bytes")
                         
                         self.udp_socket.sendto(message.encode('utf-8'), (self.server_host, self.udp_port))
                         time.sleep(0.1)  # 10 FPS
                         
                     except Exception as e:
-                        print(f"[{self.username}] Screen share send error: {e}")
+                        print(f"Screen share error: {e}")
                         break
                         
         except Exception as e:
-            print(f"[{self.username}] Screen share error: {e}")
-            messagebox.showerror("Screen Share Error", f"Could not start screen share:\n{e}")
+            print(f"Screen share init error: {e}")
             self.screen_share_enabled = False
             self.screen_btn.config(text="Share Screen", bg='#FF9800')
             
@@ -630,152 +704,6 @@ class ConferenceClient:
                 video_label.image = photo
             except Exception as e:
                 print(f"Update frame error: {e}")
-                
-    def handle_screen_share(self, message):
-        action = message.get('action')
-        username = message.get('username')
-        
-        print(f"[{self.username}] Received screen share message: action={action}, from={username}")
-        
-        if action == 'start':
-            # Skip if this is our own start message echoed back from server
-            if username == self.username:
-                print(f"[{self.username}] Ignoring own start message from server")
-                return
-            
-            # Someone else started sharing screen
-            self.screen_share_active = True
-            self.screen_share_user = username
-            self.current_page = 0
-            self.shared_screen_frame = None
-            self.display_screen_share()
-            print(f"[{self.username}] Screen share started by {username} - jumped to page 0")
-            
-        elif action == 'stop':
-            # Someone stopped sharing screen
-            if username == self.screen_share_user:
-                self.screen_share_active = False
-                self.screen_share_user = None
-                self.shared_screen_frame = None
-                self.current_page = 0
-                self.hide_screen_share_mode()
-                print(f"[{self.username}] Screen share stopped by {username}")
-                
-        elif action == 'frame':
-            # Received screen frame from someone else
-            if username != self.username and username == self.screen_share_user and self.screen_share_active:
-                try:
-                    frame_data = base64.b64decode(message['frame'])
-                    frame = cv2.imdecode(np.frombuffer(frame_data, np.uint8), cv2.IMREAD_COLOR)
-                    self.shared_screen_frame = frame
-                    
-                    # Only update if on screen share page
-                    if self.current_page == 0:
-                        self.update_screen_share_frame(frame)
-                except Exception as e:
-                    print(f"[{self.username}] Screen share frame error: {e}")
-                    
-    def display_screen_share(self):
-        """Display the screen share on page 0"""
-        print(f"[{self.username}] display_screen_share() called - clearing widgets")
-        
-        # Count existing widgets before clear
-        widget_count_before = len(self.video_frame.winfo_children())
-        print(f"[{self.username}] Widgets before clear: {widget_count_before}")
-        
-        # CRITICAL: Destroy ALL existing widgets to prevent mirroring
-        for widget in self.video_frame.winfo_children():
-            widget.destroy()
-        
-        # Force update to ensure widgets are destroyed
-        self.video_frame.update()
-        
-        # Clear all references
-        self.video_labels.clear()
-        self.screen_share_label = None
-        self.screen_share_info = None
-        
-        print(f"[{self.username}] Creating new screen share widgets for: {self.screen_share_user}")
-        
-        # Create NEW screen share display - only once
-        self.screen_share_info = tk.Label(
-            self.video_frame, 
-            text=f"🖥️ Screen shared by: {self.screen_share_user}", 
-            fg='white', 
-            bg='#1a1a1a', 
-            font=('Arial', 14, 'bold'), 
-            pady=10
-        )
-        self.screen_share_info.pack(side=tk.TOP, fill=tk.X)
-        
-        self.screen_share_label = tk.Label(
-            self.video_frame, 
-            bg='black', 
-            text="Loading screen share...", 
-            fg='gray', 
-            font=('Arial', 16)
-        )
-        self.screen_share_label.pack(fill=tk.BOTH, expand=True)
-        
-        widget_count_after = len(self.video_frame.winfo_children())
-        print(f"[{self.username}] Widgets after create: {widget_count_after}")
-        
-        # If we already have a frame, display it immediately
-        if self.shared_screen_frame is not None:
-            print(f"[{self.username}] Displaying existing frame")
-            self.update_screen_share_frame(self.shared_screen_frame)
-        
-        # Update page label
-        participant_list = list(self.participants.keys())
-        total_pages = 1 + max(1, (len(participant_list) - 1) // self.participants_per_page + 1)
-        self.page_label.config(text=f"Page 1/{total_pages} - Screen Share")
-                
-    def show_screen_share_mode(self):
-        """DEPRECATED - use display_screen_share() instead"""
-        self.display_screen_share()
-        
-    def hide_screen_share_mode(self):
-        # Clean up screen share widgets
-        if self.screen_share_label and self.screen_share_label.winfo_exists():
-            self.screen_share_label.destroy()
-            self.screen_share_label = None
-        
-        if self.screen_share_info and self.screen_share_info.winfo_exists():
-            self.screen_share_info.destroy()
-            self.screen_share_info = None
-        
-        # Return to participant video display
-        self.update_video_display()
-        
-    def update_screen_share_frame(self, frame):
-        """Update ONLY the image in the screen share label - prevents mirroring"""
-        try:
-            # Check if we're still in screen share mode and on page 0
-            if not self.screen_share_active or self.current_page != 0:
-                return
-            
-            # Check if screen share label exists and is valid
-            if not self.screen_share_label or not self.screen_share_label.winfo_exists():
-                return
-                
-            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            img = Image.fromarray(frame_rgb)
-            
-            # Get available space
-            frame_width = max(self.video_frame.winfo_width() - 20, 100)
-            frame_height = max(self.video_frame.winfo_height() - 80, 100)
-            
-            # Resize maintaining aspect ratio
-            img.thumbnail((frame_width, frame_height), Image.Resampling.LANCZOS)
-            
-            photo = ImageTk.PhotoImage(img)
-            
-            # Update ONLY the image, don't recreate widgets
-            self.screen_share_label.config(image=photo, text="")
-            self.screen_share_label.image = photo
-            
-        except Exception as e:
-            print(f"Screen share display error: {e}")
         
     def open_chat(self):
         chat_window = tk.Toplevel(self.root)
@@ -861,8 +789,8 @@ class ConferenceClient:
                 chat_display.insert(tk.END, chat_msg)
                 chat_display.config(state='disabled')
                 chat_display.see(tk.END)
-            except Exception as e:
-                print(f"Error updating chat window: {e}")
+            except:
+                pass
                     
     def open_file_transfer(self):
         filepath = filedialog.askopenfilename(title="Select file to share")

@@ -628,58 +628,79 @@ class ConferenceClient:
                 break
                 
     def send_screen_share(self):
-        """Send screen share - Cross-platform compatible"""
+        """Send screen share - Cross-platform with packet size control"""
         try:
-            # Platform-specific screen capture
             import platform
             system = platform.system()
             
             if system == "Linux":
-                # Use PIL for Linux (more compatible)
-                from PIL import ImageGrab
-                print(f"[{self.username}] Using PIL ImageGrab for Linux")
+                # Use scrot for Linux (no visual artifacts)
+                import subprocess
+                import tempfile
+                import os
+                
+                print(f"[{self.username}] Using scrot for Linux screen capture")
+                temp_dir = tempfile.gettempdir()
                 
                 while self.screen_share_enabled and self.running:
                     try:
-                        # Capture using PIL (works better on Linux)
-                        screenshot = ImageGrab.grab()
-                        frame = np.array(screenshot)
-                        frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-                        frame = cv2.resize(frame, (960, 540))
+                        # Use scrot to capture to file (no visual feedback)
+                        temp_file = os.path.join(temp_dir, f"screen_{self.username}.png")
+                        subprocess.run(['scrot', '-o', temp_file], 
+                                     capture_output=True, 
+                                     timeout=1,
+                                     check=False)
                         
-                        # Store for own display
-                        self.shared_screen_frame = frame.copy()
-                        if self.current_page == 0:
-                            self.root.after(0, self.update_screen_share_display)
+                        # Read the captured image
+                        if os.path.exists(temp_file):
+                            frame = cv2.imread(temp_file)
+                            os.remove(temp_file)  # Clean up immediately
+                            
+                            if frame is not None:
+                                frame = cv2.resize(frame, (800, 450))  # Smaller resolution
+                                
+                                # Store for own display
+                                self.shared_screen_frame = frame.copy()
+                                if self.current_page == 0:
+                                    self.root.after(0, self.update_screen_share_display)
+                                
+                                # Encode with aggressive compression
+                                _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 30])
+                                frame_data = base64.b64encode(buffer).decode('utf-8')
+                                
+                                message = json.dumps({
+                                    'type': 'screen_share',
+                                    'action': 'frame',
+                                    'username': self.username,
+                                    'frame': frame_data
+                                })
+                                
+                                # Check size
+                                msg_size = len(message.encode('utf-8'))
+                                if msg_size < 60000:  # Only send if under limit
+                                    self.udp_socket.sendto(message.encode('utf-8'), 
+                                                          (self.server_host, self.udp_port))
+                                else:
+                                    print(f"Skipping large frame: {msg_size} bytes")
                         
-                        # Encode
-                        _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 40])
-                        frame_data = base64.b64encode(buffer).decode('utf-8')
+                        time.sleep(0.15)  # 6-7 FPS for Linux
                         
-                        message = json.dumps({
-                            'type': 'screen_share',
-                            'action': 'frame',
-                            'username': self.username,
-                            'frame': frame_data
-                        })
-                        
-                        self.udp_socket.sendto(message.encode('utf-8'), (self.server_host, self.udp_port))
-                        time.sleep(0.1)
-                        
+                    except subprocess.TimeoutExpired:
+                        print("scrot timeout")
+                        continue
                     except Exception as e:
-                        print(f"PIL screen capture error: {e}")
+                        print(f"Linux screen capture error: {e}")
                         self.root.after(0, lambda: messagebox.showerror(
                             "Screen Share Error",
                             f"Linux screen capture failed: {e}\n\n"
-                            "Try:\n"
-                            "1. Install: pip install pillow\n"
-                            "2. Or run: xhost +local:"
+                            "Please install scrot:\n"
+                            "sudo apt-get install scrot"
                         ))
                         self.screen_share_enabled = False
                         self.screen_btn.config(text="Share Screen", bg='#FF9800')
                         break
             else:
-                # Use mss for Windows/Mac
+                # Windows/Mac - use mss with size control
                 with mss() as sct:
                     try:
                         monitor = sct.monitors[1]
@@ -691,15 +712,25 @@ class ConferenceClient:
                             screenshot = sct.grab(monitor)
                             frame = np.array(screenshot)
                             frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
-                            frame = cv2.resize(frame, (960, 540))
+                            
+                            # Adaptive resolution based on monitor size
+                            height, width = frame.shape[:2]
+                            
+                            # Scale down to keep packet under 60KB
+                            if width > 1920:
+                                frame = cv2.resize(frame, (800, 450))  # Very small
+                            elif width > 1280:
+                                frame = cv2.resize(frame, (960, 540))  # Medium
+                            else:
+                                frame = cv2.resize(frame, (800, 600))   # Standard
                             
                             # Store for own display
                             self.shared_screen_frame = frame.copy()
                             if self.current_page == 0:
                                 self.root.after(0, self.update_screen_share_display)
                             
-                            # Encode
-                            _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 40])
+                            # Aggressive compression for network
+                            _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 25])
                             frame_data = base64.b64encode(buffer).decode('utf-8')
                             
                             message = json.dumps({
@@ -709,9 +740,25 @@ class ConferenceClient:
                                 'frame': frame_data
                             })
                             
-                            self.udp_socket.sendto(message.encode('utf-8'), (self.server_host, self.udp_port))
-                            time.sleep(0.1)
+                            # Check packet size before sending
+                            msg_size = len(message.encode('utf-8'))
                             
+                            if msg_size < 60000:  # UDP safe limit
+                                self.udp_socket.sendto(message.encode('utf-8'), 
+                                                      (self.server_host, self.udp_port))
+                            else:
+                                # Frame too large, skip it
+                                print(f"Skipping large frame: {msg_size} bytes")
+                            
+                            time.sleep(0.1)  # 10 FPS
+                            
+                        except OSError as e:
+                            if "10040" in str(e):
+                                print(f"Packet too large, reducing quality...")
+                                continue
+                            else:
+                                print(f"Screen share error: {e}")
+                                break
                         except Exception as e:
                             print(f"Screen share error: {e}")
                             break

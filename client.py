@@ -628,49 +628,31 @@ class ConferenceClient:
                 break
                 
     def send_screen_share(self):
-        """Send screen share - OPTIMIZED with Linux support"""
+        """Send screen share - Cross-platform compatible"""
         try:
-            with mss() as sct:
-                # Get primary monitor
-                try:
-                    monitor = sct.monitors[1]
-                except Exception as e:
-                    print(f"Monitor detection error: {e}")
-                    # Fallback to monitor 0 (all monitors combined)
-                    monitor = sct.monitors[0]
+            # Platform-specific screen capture
+            import platform
+            system = platform.system()
+            
+            if system == "Linux":
+                # Use PIL for Linux (more compatible)
+                from PIL import ImageGrab
+                print(f"[{self.username}] Using PIL ImageGrab for Linux")
                 
                 while self.screen_share_enabled and self.running:
                     try:
-                        # Capture screen - with Linux error handling
-                        try:
-                            screenshot = sct.grab(monitor)
-                        except Exception as grab_error:
-                            print(f"Screen grab error (Linux XGetImage): {grab_error}")
-                            # Try alternative capture method for Linux
-                            import subprocess
-                            print("Attempting alternative screen capture for Linux...")
-                            self.root.after(0, lambda: messagebox.showerror(
-                                "Screen Share Error", 
-                                "Screen sharing failed on Linux.\n\n"
-                                "Please run:\n"
-                                "sudo apt-get install scrot\n"
-                                "Or use: xhost +local:\n\n"
-                                "This is a Linux X11 permission issue."
-                            ))
-                            self.screen_share_enabled = False
-                            self.screen_btn.config(text="Share Screen", bg='#FF9800')
-                            break
-                        
+                        # Capture using PIL (works better on Linux)
+                        screenshot = ImageGrab.grab()
                         frame = np.array(screenshot)
-                        frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
-                        frame = cv2.resize(frame, (960, 540))  # 540p for balance
+                        frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+                        frame = cv2.resize(frame, (960, 540))
                         
                         # Store for own display
                         self.shared_screen_frame = frame.copy()
                         if self.current_page == 0:
                             self.root.after(0, self.update_screen_share_display)
                         
-                        # Encode with lower quality for speed
+                        # Encode
                         _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 40])
                         frame_data = base64.b64encode(buffer).decode('utf-8')
                         
@@ -681,24 +663,64 @@ class ConferenceClient:
                             'frame': frame_data
                         })
                         
-                        # Check packet size
-                        msg_size = len(message.encode('utf-8'))
-                        if msg_size > 65000:
-                            print(f"Warning: Large packet {msg_size} bytes")
-                        
                         self.udp_socket.sendto(message.encode('utf-8'), (self.server_host, self.udp_port))
-                        time.sleep(0.1)  # 10 FPS
+                        time.sleep(0.1)
                         
                     except Exception as e:
-                        print(f"Screen share error: {e}")
+                        print(f"PIL screen capture error: {e}")
+                        self.root.after(0, lambda: messagebox.showerror(
+                            "Screen Share Error",
+                            f"Linux screen capture failed: {e}\n\n"
+                            "Try:\n"
+                            "1. Install: pip install pillow\n"
+                            "2. Or run: xhost +local:"
+                        ))
+                        self.screen_share_enabled = False
+                        self.screen_btn.config(text="Share Screen", bg='#FF9800')
                         break
+            else:
+                # Use mss for Windows/Mac
+                with mss() as sct:
+                    try:
+                        monitor = sct.monitors[1]
+                    except:
+                        monitor = sct.monitors[0]
+                    
+                    while self.screen_share_enabled and self.running:
+                        try:
+                            screenshot = sct.grab(monitor)
+                            frame = np.array(screenshot)
+                            frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
+                            frame = cv2.resize(frame, (960, 540))
+                            
+                            # Store for own display
+                            self.shared_screen_frame = frame.copy()
+                            if self.current_page == 0:
+                                self.root.after(0, self.update_screen_share_display)
+                            
+                            # Encode
+                            _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 40])
+                            frame_data = base64.b64encode(buffer).decode('utf-8')
+                            
+                            message = json.dumps({
+                                'type': 'screen_share',
+                                'action': 'frame',
+                                'username': self.username,
+                                'frame': frame_data
+                            })
+                            
+                            self.udp_socket.sendto(message.encode('utf-8'), (self.server_host, self.udp_port))
+                            time.sleep(0.1)
+                            
+                        except Exception as e:
+                            print(f"Screen share error: {e}")
+                            break
                         
         except Exception as e:
             print(f"Screen share init error: {e}")
             self.root.after(0, lambda: messagebox.showerror(
                 "Screen Share Error",
-                f"Could not start screen share:\n{e}\n\n"
-                "Linux users: Try running 'xhost +local:' first"
+                f"Could not start screen share: {e}"
             ))
             self.screen_share_enabled = False
             self.screen_btn.config(text="Share Screen", bg='#FF9800')

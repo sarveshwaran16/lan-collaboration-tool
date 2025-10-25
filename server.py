@@ -148,8 +148,20 @@ class ConferenceServer:
                         self.route_file(client_socket, message)
                     elif msg_type == 'status_update':
                         self.update_status(client_socket, message)
+                    elif msg_type == 'ping':
+                        # Respond to keep-alive ping
+                        try:
+                            client_socket.send(json.dumps({'type': 'pong'}).encode('utf-8'))
+                        except:
+                            break
                         
                 except socket.timeout:
+                    # Check if client is still alive
+                    try:
+                        client_socket.send(json.dumps({'type': 'ping'}).encode('utf-8'))
+                    except:
+                        print(f"Client {username} connection lost (timeout)")
+                        break
                     continue
                 except ConnectionResetError:
                     print(f"Client {username} connection reset")
@@ -168,6 +180,10 @@ class ConferenceServer:
             print(f"Error with client {address}: {e}")
         finally:
             self.remove_client(client_socket, username)
+            
+            # Force update to all remaining clients
+            time.sleep(0.2)
+            self.broadcast_participant_update()
             
     def send_participant_list(self, client_socket):
         participants = []

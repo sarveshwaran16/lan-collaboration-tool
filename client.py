@@ -493,9 +493,16 @@ class ConferenceClient:
             
             if self.username in self.participants:
                 self.participants[self.username]['video'] = False
+                self.participants[self.username]['frame'] = None  # Clear the frame
             
             message = json.dumps({'type': 'status_update', 'video': False})
             self.tcp_socket.send(message.encode('utf-8'))
+            
+            # Clear own video display
+            if self.username in self.video_labels:
+                video_label = self.video_labels[self.username]['video_label']
+                video_label.config(image='', text=self.username)
+                video_label.image = None
             
     def toggle_audio(self):
         if not self.audio_enabled:
@@ -621,15 +628,39 @@ class ConferenceClient:
                 break
                 
     def send_screen_share(self):
-        """Send screen share - OPTIMIZED for low latency"""
+        """Send screen share - OPTIMIZED with Linux support"""
         try:
             with mss() as sct:
-                monitor = sct.monitors[1]
+                # Get primary monitor
+                try:
+                    monitor = sct.monitors[1]
+                except Exception as e:
+                    print(f"Monitor detection error: {e}")
+                    # Fallback to monitor 0 (all monitors combined)
+                    monitor = sct.monitors[0]
                 
                 while self.screen_share_enabled and self.running:
                     try:
-                        # Capture screen
-                        screenshot = sct.grab(monitor)
+                        # Capture screen - with Linux error handling
+                        try:
+                            screenshot = sct.grab(monitor)
+                        except Exception as grab_error:
+                            print(f"Screen grab error (Linux XGetImage): {grab_error}")
+                            # Try alternative capture method for Linux
+                            import subprocess
+                            print("Attempting alternative screen capture for Linux...")
+                            self.root.after(0, lambda: messagebox.showerror(
+                                "Screen Share Error", 
+                                "Screen sharing failed on Linux.\n\n"
+                                "Please run:\n"
+                                "sudo apt-get install scrot\n"
+                                "Or use: xhost +local:\n\n"
+                                "This is a Linux X11 permission issue."
+                            ))
+                            self.screen_share_enabled = False
+                            self.screen_btn.config(text="Share Screen", bg='#FF9800')
+                            break
+                        
                         frame = np.array(screenshot)
                         frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
                         frame = cv2.resize(frame, (960, 540))  # 540p for balance
@@ -664,6 +695,11 @@ class ConferenceClient:
                         
         except Exception as e:
             print(f"Screen share init error: {e}")
+            self.root.after(0, lambda: messagebox.showerror(
+                "Screen Share Error",
+                f"Could not start screen share:\n{e}\n\n"
+                "Linux users: Try running 'xhost +local:' first"
+            ))
             self.screen_share_enabled = False
             self.screen_btn.config(text="Share Screen", bg='#FF9800')
             
@@ -873,6 +909,17 @@ class ConferenceClient:
             messagebox.showerror("Error", f"Could not save file:\n{e}")
                 
     def on_closing(self):
+        # Confirmation dialog
+        result = messagebox.askyesno(
+            "Leave Meeting", 
+            "Are you sure you want to leave the meeting?",
+            icon='warning'
+        )
+        
+        if not result:
+            return  # User clicked "No", don't close
+        
+        # User clicked "Yes", proceed with cleanup
         self.running = False
         
         if self.video_enabled and self.cap:

@@ -12,6 +12,7 @@ from PIL import Image
 import numpy as np
 from mss import mss
 import sys
+import os
 
 class VideoLabel(QLabel):
     """Custom label for video display"""
@@ -20,6 +21,7 @@ class VideoLabel(QLabel):
         self.setAlignment(Qt.AlignCenter)
         self.setStyleSheet("background-color: black; color: white;")
         self.setScaledContents(False)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
 class ConferenceClientPyQt5(QMainWindow):
     # Signals for thread-safe GUI updates
@@ -60,7 +62,7 @@ class ConferenceClientPyQt5(QMainWindow):
         # Data
         self.participants = {}
         self.current_page = 0
-        self.participants_per_page = 4  # MAX 4 per page
+        self.participants_per_page = 4
         self.chat_windows = []
         self.chat_history = []
         self.shared_screen_frame = None
@@ -69,6 +71,7 @@ class ConferenceClientPyQt5(QMainWindow):
         self.video_labels = {}
         self.screen_share_label = None
         self.screen_share_info = None
+        self.presenter_overlay = None
         
         # Connect signals
         self.participant_list_signal.connect(self.update_participant_list)
@@ -85,14 +88,13 @@ class ConferenceClientPyQt5(QMainWindow):
         self.setWindowTitle(f"Conference - {self.username}")
         self.setGeometry(100, 100, 1200, 700)
         
-        # Central widget
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QHBoxLayout(central_widget)
         main_layout.setSpacing(10)
         main_layout.setContentsMargins(10, 10, 10, 10)
         
-        # Left panel - Video and controls
+        # Left panel
         left_widget = QWidget()
         left_layout = QVBoxLayout(left_widget)
         left_layout.setSpacing(5)
@@ -103,6 +105,7 @@ class ConferenceClientPyQt5(QMainWindow):
         self.video_frame.setStyleSheet("background-color: black;")
         self.video_layout = QGridLayout(self.video_frame)
         self.video_layout.setSpacing(2)
+        self.video_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.addWidget(self.video_frame, stretch=1)
         
         # Navigation
@@ -161,7 +164,7 @@ class ConferenceClientPyQt5(QMainWindow):
         
         main_layout.addWidget(left_widget, stretch=4)
         
-        # Right panel - Participants
+        # Right panel
         right_widget = QWidget()
         right_widget.setMaximumWidth(200)
         right_layout = QVBoxLayout(right_widget)
@@ -177,7 +180,6 @@ class ConferenceClientPyQt5(QMainWindow):
         
         main_layout.addWidget(right_widget, stretch=1)
         
-        # Apply modern stylesheet
         self.setStyleSheet("""
             QMainWindow {
                 background-color: #2C2C2C;
@@ -203,31 +205,25 @@ class ConferenceClientPyQt5(QMainWindow):
         
     def connect(self):
         try:
-            # Connect TCP
             self.tcp_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.tcp_socket.connect((self.server_host, self.tcp_port))
             
-            # Send username
             message = json.dumps({'username': self.username})
             self.tcp_socket.send(message.encode('utf-8'))
             
-            # Receive UDP port info
             data = self.tcp_socket.recv(4096).decode('utf-8')
             msg = json.loads(data)
             self.udp_port = msg.get('udp_port', 5556)
             
-            # Create UDP socket
             self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             self.udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 2097152)
             self.udp_socket.bind(('', 0))
             
-            # Register with server
             register_msg = json.dumps({'type': 'register', 'username': self.username})
             self.udp_socket.sendto(register_msg.encode('utf-8'), (self.server_host, self.udp_port))
             
             self.running = True
             
-            # Setup audio output
             try:
                 self.audio_out = pyaudio.PyAudio()
                 self.stream_out = self.audio_out.open(
@@ -240,7 +236,6 @@ class ConferenceClientPyQt5(QMainWindow):
             except Exception as e:
                 print(f"Audio output error: {e}")
             
-            # Start threads
             tcp_thread = threading.Thread(target=self.receive_tcp)
             tcp_thread.daemon = True
             tcp_thread.start()
@@ -256,17 +251,12 @@ class ConferenceClientPyQt5(QMainWindow):
             
     def receive_tcp(self):
         buffer = ""
-        consecutive_errors = 0
-        max_errors = 5
-        
         while self.running:
             try:
                 data = self.tcp_socket.recv(65536)
                 if not data:
-                    print("TCP connection closed by server")
                     break
                 
-                consecutive_errors = 0  # Reset error counter on successful receive
                 buffer += data.decode('utf-8')
                 
                 while True:
@@ -282,44 +272,14 @@ class ConferenceClientPyQt5(QMainWindow):
                             self.chat_message_signal.emit(message)
                         elif msg_type == 'file_transfer':
                             self.file_transfer_signal.emit(message)
-                        elif msg_type == 'ping':
-                            # Respond to keep-alive
-                            try:
-                                self.tcp_socket.send(json.dumps({'type': 'pong'}).encode('utf-8'))
-                            except:
-                                pass
                             
                     except json.JSONDecodeError:
                         break
                         
-            except socket.timeout:
-                # Send keep-alive
-                try:
-                    self.tcp_socket.send(json.dumps({'type': 'ping'}).encode('utf-8'))
-                except:
-                    print("Failed to send keep-alive")
-                    consecutive_errors += 1
-                    if consecutive_errors >= max_errors:
-                        print("Too many errors, disconnecting")
-                        break
-                continue
-            except ConnectionResetError:
-                print("Connection reset by peer")
-                break
             except Exception as e:
                 if self.running:
                     print(f"TCP error: {e}")
-                    consecutive_errors += 1
-                    if consecutive_errors >= max_errors:
-                        print("Too many consecutive errors, disconnecting")
-                        break
-                    time.sleep(1)  # Wait before retrying
-                else:
-                    break
-        
-        # Connection lost - notify user
-        if self.running:
-            QMessageBox.warning(self, "Connection Lost", "Disconnected from server")
+                break
     
     def receive_udp(self):
         while self.running:
@@ -367,7 +327,7 @@ class ConferenceClientPyQt5(QMainWindow):
             if self.stream_out and self.stream_out.is_active():
                 self.stream_out.write(audio_data)
         except Exception as e:
-            print(f"Audio error: {e}")
+            pass
     
     def handle_screen_share_frame(self, message):
         try:
@@ -378,7 +338,7 @@ class ConferenceClientPyQt5(QMainWindow):
             if self.current_page == 0 and self.screen_share_active:
                 self.screen_share_frame_signal.emit(frame)
         except Exception as e:
-            print(f"Screen frame error: {e}")
+            pass
     
     def update_participant_list(self, participants):
         for p in participants:
@@ -416,21 +376,15 @@ class ConferenceClientPyQt5(QMainWindow):
         while self.video_layout.count():
             item = self.video_layout.takeAt(0)
             if item.widget():
-                item.widget().deleteLater()
+                widget = item.widget()
+                widget.setParent(None)
+                widget.deleteLater()
+        
         self.video_labels.clear()
+        QApplication.processEvents()
         
         participant_list = list(self.participants.keys())
         total_participants = len(participant_list)
-        
-        # Minimize pages - auto-adjust current page if needed
-        if self.screen_share_active:
-            max_pages = 1 + ((total_participants - 1) // self.participants_per_page + 1)
-        else:
-            max_pages = max(1, (total_participants - 1) // self.participants_per_page + 1)
-        
-        # If current page is now invalid, go to last valid page
-        if self.current_page >= max_pages:
-            self.current_page = max(0, max_pages - 1)
         
         if self.screen_share_active:
             if self.current_page == 0:
@@ -441,6 +395,11 @@ class ConferenceClientPyQt5(QMainWindow):
             participant_page = self.current_page
             total_pages = max(1, (total_participants - 1) // self.participants_per_page + 1)
         
+        # Auto-adjust current page if invalid
+        if self.current_page >= total_pages:
+            self.current_page = max(0, total_pages - 1)
+            participant_page = self.current_page if not self.screen_share_active else self.current_page - 1
+        
         start_idx = participant_page * self.participants_per_page
         end_idx = start_idx + self.participants_per_page
         page_participants = participant_list[start_idx:end_idx]
@@ -450,50 +409,32 @@ class ConferenceClientPyQt5(QMainWindow):
             self.page_label.setText(f"Page {self.current_page + 1}/{total_pages}")
             return
         
-        # SMART LAYOUT based on ACTUAL number on THIS page (not total)
+        # Smart layout for FULL screen utilization
         if num_participants == 1:
-            # Full screen - 1x1
             rows, cols = 1, 1
-            layout_type = "fullscreen"
         elif num_participants == 2:
-            # Side by side - 1x2
             rows, cols = 1, 2
-            layout_type = "sidebyside"
         elif num_participants == 3:
-            # 2 on top, 1 centered at bottom - 2x2 with span
-            rows, cols = 2, 2
-            layout_type = "three_special"
+            rows, cols = 2, 2  # 2x2 grid, last cell empty
         elif num_participants == 4:
-            # Perfect 2x2 grid
             rows, cols = 2, 2
-            layout_type = "grid"
         else:
             rows, cols = 2, 2
-            layout_type = "grid"
+        
+        # Set grid stretch FIRST
+        for i in range(rows):
+            self.video_layout.setRowStretch(i, 1)
+        for i in range(cols):
+            self.video_layout.setColumnStretch(i, 1)
         
         for idx, username in enumerate(page_participants):
-            # Determine position based on layout type
-            if layout_type == "fullscreen":
-                row, col, rowspan, colspan = 0, 0, 1, 1
-            elif layout_type == "sidebyside":
-                row, col = 0, idx
-                rowspan, colspan = 1, 1
-            elif layout_type == "three_special":
-                if idx == 0:
-                    row, col = 0, 0
-                elif idx == 1:
-                    row, col = 0, 1
-                else:  # idx == 2, center it at bottom spanning both columns
-                    row, col, rowspan, colspan = 1, 0, 1, 2
-                if idx < 2:
-                    rowspan, colspan = 1, 1
-            else:  # grid
-                row = idx // cols
-                col = idx % cols
-                rowspan, colspan = 1, 1
+            row = idx // cols
+            col = idx % cols
             
             cell_widget = QWidget()
             cell_widget.setStyleSheet("background-color: black; border: 1px solid gray;")
+            cell_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+            
             cell_layout = QVBoxLayout(cell_widget)
             cell_layout.setContentsMargins(2, 2, 2, 2)
             cell_layout.setSpacing(0)
@@ -501,12 +442,11 @@ class ConferenceClientPyQt5(QMainWindow):
             video_label = VideoLabel()
             video_label.setText(username)
             video_label.setStyleSheet("font-size: 16px; color: white;")
-            video_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
-            video_label.setScaledContents(False)
             cell_layout.addWidget(video_label, stretch=1)
             
             info_widget = QWidget()
-            info_widget.setStyleSheet("background-color: black;")
+            info_widget.setStyleSheet("background-color: #1a1a1a;")
+            info_widget.setFixedHeight(30)
             info_layout = QHBoxLayout(info_widget)
             info_layout.setContentsMargins(5, 2, 5, 2)
             
@@ -523,8 +463,7 @@ class ConferenceClientPyQt5(QMainWindow):
             info_layout.addStretch()
             cell_layout.addWidget(info_widget)
             
-            # Add to grid with proper span
-            self.video_layout.addWidget(cell_widget, row, col, rowspan, colspan)
+            self.video_layout.addWidget(cell_widget, row, col)
             
             self.video_labels[username] = {
                 'video_label': video_label,
@@ -535,12 +474,6 @@ class ConferenceClientPyQt5(QMainWindow):
             
             if participant_data['frame'] is not None:
                 self.update_video_frame(username, participant_data['frame'])
-        
-        # Configure grid weights for proper sizing
-        for i in range(rows):
-            self.video_layout.setRowStretch(i, 1)
-        for i in range(cols):
-            self.video_layout.setColumnStretch(i, 1)
         
         self.page_label.setText(f"Page {self.current_page + 1}/{total_pages}")
     
@@ -555,73 +488,109 @@ class ConferenceClientPyQt5(QMainWindow):
                 video_label = self.video_labels[username]['video_label']
                 cell_widget = self.video_labels[username]['cell_widget']
                 
-                # Get cell size (not label size) to fit properly
+                # Get actual cell size
                 cell_size = cell_widget.size()
-                
-                # Account for info bar (approx 30px)
-                available_height = cell_size.height() - 35
-                available_width = cell_size.width() - 10
+                available_width = max(cell_size.width() - 10, 100)
+                available_height = max(cell_size.height() - 40, 100)
                 
                 pixmap = QPixmap.fromImage(q_image)
-                # Scale to fit available space while maintaining aspect ratio
                 scaled_pixmap = pixmap.scaled(
-                    available_width, 
-                    available_height, 
-                    Qt.KeepAspectRatio, 
+                    available_width,
+                    available_height,
+                    Qt.KeepAspectRatio,
                     Qt.SmoothTransformation
                 )
                 
                 video_label.setPixmap(scaled_pixmap)
-                video_label.setText("")  # Clear text when video shows
+                video_label.setText("")
             except Exception as e:
-                print(f"Update frame error: {e}")
+                pass
     
     def display_screen_share(self):
+        # Clear existing
         while self.video_layout.count():
             item = self.video_layout.takeAt(0)
             if item.widget():
-                item.widget().deleteLater()
+                widget = item.widget()
+                widget.setParent(None)
+                widget.deleteLater()
+        
         self.video_labels.clear()
+        QApplication.processEvents()
         
-        # Full screen container - takes entire grid
-        container = QWidget()
-        container.setStyleSheet("background-color: black;")
-        layout = QVBoxLayout(container)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
+        # Main container
+        main_container = QWidget()
+        main_container.setStyleSheet("background-color: black;")
+        main_layout = QVBoxLayout(main_container)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
         
+        # Info bar
         self.screen_share_info = QLabel(f"🖥️ Screen shared by: {self.screen_share_user}")
         self.screen_share_info.setStyleSheet("color: white; background-color: #1a1a1a; font-size: 14px; font-weight: bold; padding: 10px;")
         self.screen_share_info.setAlignment(Qt.AlignCenter)
         self.screen_share_info.setFixedHeight(40)
-        layout.addWidget(self.screen_share_info)
+        main_layout.addWidget(self.screen_share_info)
         
+        # Screen + overlay container
+        screen_container = QWidget()
+        screen_container.setStyleSheet("background-color: black;")
+        screen_container_layout = QStackedLayout(screen_container)  # Use stacked to overlay
+        
+        # Screen share label (background)
         self.screen_share_label = VideoLabel()
         self.screen_share_label.setText("Loading screen share...")
         self.screen_share_label.setStyleSheet("color: gray; font-size: 16px;")
-        self.screen_share_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        layout.addWidget(self.screen_share_label, stretch=1)
+        screen_container_layout.addWidget(self.screen_share_label)
         
-        # Add to grid spanning ALL rows and columns - FULL PAGE
-        self.video_layout.addWidget(container, 0, 0, 2, 2)
+        # Presenter overlay (bottom-right, small)
+        if self.screen_share_user in self.participants:
+            overlay_frame = QFrame(screen_container)
+            overlay_frame.setStyleSheet("background-color: rgba(0, 0, 0, 180); border: 2px solid #4CAF50; border-radius: 5px;")
+            overlay_frame.setFixedSize(200, 150)
+            overlay_frame.move(10, 10)  # Will be repositioned on resize
+            
+            overlay_layout = QVBoxLayout(overlay_frame)
+            overlay_layout.setContentsMargins(2, 2, 2, 2)
+            overlay_layout.setSpacing(0)
+            
+            self.presenter_overlay = VideoLabel()
+            self.presenter_overlay.setText(self.screen_share_user)
+            self.presenter_overlay.setStyleSheet("font-size: 12px; color: white;")
+            overlay_layout.addWidget(self.presenter_overlay)
+            
+            presenter_name = QLabel(self.screen_share_user)
+            presenter_name.setStyleSheet("color: white; font-size: 9px; font-weight: bold; background-color: #1a1a1a; padding: 2px;")
+            presenter_name.setAlignment(Qt.AlignCenter)
+            overlay_layout.addWidget(presenter_name)
+            
+            # Position overlay at bottom-right
+            def position_overlay():
+                if screen_container.isVisible():
+                    x = screen_container.width() - overlay_frame.width() - 10
+                    y = screen_container.height() - overlay_frame.height() - 10
+                    overlay_frame.move(max(10, x), max(10, y))
+            
+            screen_container.resizeEvent = lambda event: position_overlay()
+            overlay_frame.raise_()  # Bring to front
         
-        # Make grid expand to fill
+        main_layout.addWidget(screen_container, stretch=1)
+        
+        # Add to grid
+        self.video_layout.addWidget(main_container, 0, 0)
         self.video_layout.setRowStretch(0, 1)
-        self.video_layout.setRowStretch(1, 1)
         self.video_layout.setColumnStretch(0, 1)
-        self.video_layout.setColumnStretch(1, 1)
         
         if self.shared_screen_frame is not None:
             self.update_screen_share_display(self.shared_screen_frame)
         
+        # Update presenter overlay if they have video
+        if self.screen_share_user in self.participants and self.participants[self.screen_share_user]['frame'] is not None:
+            self.update_presenter_overlay(self.participants[self.screen_share_user]['frame'])
+        
         participant_list = list(self.participants.keys())
         total_pages = 1 + max(1, (len(participant_list) - 1) // self.participants_per_page + 1)
         self.page_label.setText(f"Page 1/{total_pages} - Screen Share")
-    
-    def hide_screen_share(self):
-        self.screen_share_label = None
-        self.screen_share_info = None
-        self.update_video_display()
     
     def update_screen_share_display(self, frame):
         try:
@@ -638,7 +607,30 @@ class ConferenceClientPyQt5(QMainWindow):
             self.screen_share_label.setPixmap(scaled_pixmap)
             self.screen_share_label.setText("")
         except Exception as e:
-            print(f"Screen display error: {e}")
+            pass
+    
+    def update_presenter_overlay(self, frame):
+        try:
+            if not self.presenter_overlay:
+                return
+            
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            height, width, channel = frame_rgb.shape
+            bytes_per_line = 3 * width
+            q_image = QImage(frame_rgb.data, width, height, bytes_per_line, QImage.Format_RGB888)
+            
+            pixmap = QPixmap.fromImage(q_image)
+            scaled_pixmap = pixmap.scaled(196, 130, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            self.presenter_overlay.setPixmap(scaled_pixmap)
+            self.presenter_overlay.setText("")
+        except Exception as e:
+            pass
+    
+    def hide_screen_share(self):
+        self.screen_share_label = None
+        self.screen_share_info = None
+        self.presenter_overlay = None
+        self.update_video_display()
     
     def handle_screen_share_start(self, username):
         self.screen_share_active = True
@@ -675,21 +667,25 @@ class ConferenceClientPyQt5(QMainWindow):
     def toggle_video(self):
         if not self.video_enabled:
             try:
-                self.cap = cv2.VideoCapture(0)
-                # Set backend explicitly for Windows
-                if not self.cap.isOpened():
-                    # Try DirectShow backend for Windows
-                    self.cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+                # Linux-compatible camera opening
+                import platform
+                if platform.system() == "Linux":
+                    # Try V4L2 backend first on Linux
+                    self.cap = cv2.VideoCapture(0, cv2.CAP_V4L2)
+                    if not self.cap.isOpened():
+                        self.cap = cv2.VideoCapture(0)
+                else:
+                    self.cap = cv2.VideoCapture(0)
+                    if not self.cap.isOpened():
+                        self.cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
                 
                 if not self.cap.isOpened():
                     QMessageBox.critical(self, "Error", "Could not open camera")
                     return
                 
-                # Set camera properties for stability
                 self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
                 self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
                 self.cap.set(cv2.CAP_PROP_FPS, 30)
-                self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Reduce buffer
                 
                 self.video_enabled = True
                 self.video_btn.setText("Stop Video")
@@ -727,23 +723,41 @@ class ConferenceClientPyQt5(QMainWindow):
             
             message = json.dumps({'type': 'status_update', 'video': False})
             self.tcp_socket.send(message.encode('utf-8'))
-            
-            if self.username in self.video_labels:
-                video_label = self.video_labels[self.username]['video_label']
-                video_label.clear()
-                video_label.setText(self.username)
     
     def toggle_audio(self):
         if not self.audio_enabled:
             try:
                 self.audio_in = pyaudio.PyAudio()
-                self.stream_in = self.audio_in.open(
-                    format=pyaudio.paInt16,
-                    channels=1,
-                    rate=16000,
-                    input=True,
-                    frames_per_buffer=2048
-                )
+                
+                # Linux-compatible: try to find working device
+                try:
+                    self.stream_in = self.audio_in.open(
+                        format=pyaudio.paInt16,
+                        channels=1,
+                        rate=16000,
+                        input=True,
+                        frames_per_buffer=2048
+                    )
+                except OSError as e:
+                    # Try with explicit device if default fails
+                    print(f"Default audio device failed: {e}")
+                    device_count = self.audio_in.get_device_count()
+                    for i in range(device_count):
+                        try:
+                            self.stream_in = self.audio_in.open(
+                                format=pyaudio.paInt16,
+                                channels=1,
+                                rate=16000,
+                                input=True,
+                                frames_per_buffer=2048,
+                                input_device_index=i
+                            )
+                            print(f"Using audio device {i}")
+                            break
+                        except:
+                            continue
+                    else:
+                        raise Exception("No working audio device found")
                 
                 self.audio_enabled = True
                 self.audio_btn.setText("Stop Audio")
@@ -814,14 +828,8 @@ class ConferenceClientPyQt5(QMainWindow):
         while self.video_enabled and self.running:
             try:
                 ret, frame = self.cap.read()
-                if not ret:
-                    print("Failed to grab video frame, retrying...")
+                if not ret or frame is None or frame.size == 0:
                     time.sleep(0.1)
-                    continue
-                    
-                if frame is None or frame.size == 0:
-                    print("Empty frame received, skipping...")
-                    time.sleep(0.033)
                     continue
                 
                 frame = cv2.resize(frame, (320, 240))
@@ -840,13 +848,7 @@ class ConferenceClientPyQt5(QMainWindow):
                 self.video_frame_signal.emit(self.username, frame)
                 
                 time.sleep(0.033)
-            except cv2.error as e:
-                print(f"OpenCV error: {e}")
-                time.sleep(0.1)
-                continue
             except Exception as e:
-                print(f"Video error: {e}")
-                # Don't break, try to continue
                 time.sleep(0.1)
                 continue
     
@@ -865,7 +867,6 @@ class ConferenceClientPyQt5(QMainWindow):
                 self.udp_socket.sendto(message.encode('utf-8'), (self.server_host, self.udp_port))
                 time.sleep(0.05)
             except Exception as e:
-                print(f"Audio error: {e}")
                 break
     
     def send_screen_share(self):
@@ -874,8 +875,11 @@ class ConferenceClientPyQt5(QMainWindow):
             system = platform.system()
             
             if system == "Linux":
-                # PyQt5 for Linux (silent capture)
+                # Linux-compatible screen capture using PyQt5
                 try:
+                    # Suppress Wayland warnings
+                    os.environ['QT_QPA_PLATFORM'] = 'xcb'
+                    
                     app = QApplication.instance()
                     if app is None:
                         app = QApplication(sys.argv)
@@ -913,8 +917,6 @@ class ConferenceClientPyQt5(QMainWindow):
                             msg_size = len(message.encode('utf-8'))
                             if msg_size < 60000:
                                 self.udp_socket.sendto(message.encode('utf-8'), (self.server_host, self.udp_port))
-                            else:
-                                print(f"Skipping large frame: {msg_size} bytes")
                             
                             time.sleep(0.15)
                             
@@ -922,13 +924,13 @@ class ConferenceClientPyQt5(QMainWindow):
                             print(f"Linux screen error: {e}")
                             break
                             
-                except ImportError:
-                    QMessageBox.critical(self, "Error", "PyQt5 not properly installed")
+                except Exception as e:
+                    QMessageBox.critical(self, "Error", f"Screen capture failed: {e}")
                     self.screen_share_enabled = False
                     return
                     
             else:
-                # Windows/Mac
+                # Windows/Mac with mss
                 with mss() as sct:
                     try:
                         monitor = sct.monitors[1]
@@ -940,15 +942,7 @@ class ConferenceClientPyQt5(QMainWindow):
                             screenshot = sct.grab(monitor)
                             frame = np.array(screenshot)
                             frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
-                            
-                            height, width = frame.shape[:2]
-                            
-                            if width > 1920:
-                                frame = cv2.resize(frame, (800, 450))
-                            elif width > 1280:
-                                frame = cv2.resize(frame, (960, 540))
-                            else:
-                                frame = cv2.resize(frame, (800, 600))
+                            frame = cv2.resize(frame, (800, 600))
                             
                             self.shared_screen_frame = frame.copy()
                             if self.current_page == 0:
@@ -965,27 +959,16 @@ class ConferenceClientPyQt5(QMainWindow):
                             })
                             
                             msg_size = len(message.encode('utf-8'))
-                            
                             if msg_size < 60000:
                                 self.udp_socket.sendto(message.encode('utf-8'), (self.server_host, self.udp_port))
-                            else:
-                                print(f"Skipping large frame: {msg_size} bytes")
                             
                             time.sleep(0.1)
                             
-                        except OSError as e:
-                            if "10040" in str(e):
-                                print(f"Packet too large")
-                                continue
-                            else:
-                                print(f"Screen error: {e}")
-                                break
                         except Exception as e:
                             print(f"Screen error: {e}")
                             break
                         
         except Exception as e:
-            print(f"Screen init error: {e}")
             QMessageBox.critical(self, "Error", f"Screen share failed:\n{e}")
             self.screen_share_enabled = False
     
@@ -996,7 +979,6 @@ class ConferenceClientPyQt5(QMainWindow):
         
         layout = QVBoxLayout(chat_dialog)
         
-        # Recipient selection
         recipient_label = QLabel("Send to:")
         recipient_label.setStyleSheet("font-weight: bold; font-size: 11px;")
         layout.addWidget(recipient_label)
@@ -1009,7 +991,6 @@ class ConferenceClientPyQt5(QMainWindow):
         
         everyone_radio = QRadioButton("Everyone")
         everyone_radio.setChecked(True)
-        everyone_radio.setStyleSheet("font-size: 10px;")
         button_group.addButton(everyone_radio)
         recipient_layout.addWidget(everyone_radio)
         
@@ -1018,31 +999,26 @@ class ConferenceClientPyQt5(QMainWindow):
         for username in self.participants.keys():
             if username != self.username:
                 radio = QRadioButton(username)
-                radio.setStyleSheet("font-size: 10px;")
                 button_group.addButton(radio)
                 recipient_layout.addWidget(radio)
                 recipient_buttons[username] = radio
         
         layout.addWidget(recipient_group)
         
-        # Chat display
         chat_display = QTextEdit()
         chat_display.setReadOnly(True)
-        chat_display.setStyleSheet("background-color: #2C2C2C; color: white; border: 1px solid #555; font-size: 10px;")
+        chat_display.setStyleSheet("background-color: #2C2C2C; color: white; border: 1px solid #555;")
         
-        # Load history
         for msg in self.chat_history:
             chat_display.append(msg.strip())
         
         layout.addWidget(chat_display)
         
-        # Message entry
         message_frame = QWidget()
         message_layout = QHBoxLayout(message_frame)
-        message_layout.setContentsMargins(0, 0, 0, 0)
         
         message_entry = QLineEdit()
-        message_entry.setStyleSheet("background-color: #3C3C3C; color: white; border: 1px solid #555; padding: 5px; font-size: 10px;")
+        message_entry.setStyleSheet("background-color: #3C3C3C; color: white; padding: 5px;")
         message_layout.addWidget(message_entry)
         
         def send_chat():
@@ -1064,7 +1040,7 @@ class ConferenceClientPyQt5(QMainWindow):
                         self.tcp_socket.send(message.encode('utf-8'))
                         message_entry.clear()
                     except Exception as e:
-                        QMessageBox.critical(self, "Error", f"Could not send:\n{e}")
+                        QMessageBox.critical(self, "Error", str(e))
         
         send_btn = QPushButton("Send")
         send_btn.setStyleSheet("background-color: #4CAF50; color: white; padding: 5px; font-weight: bold;")
@@ -1072,17 +1048,10 @@ class ConferenceClientPyQt5(QMainWindow):
         message_layout.addWidget(send_btn)
         
         message_entry.returnPressed.connect(send_chat)
-        
         layout.addWidget(message_frame)
         
         self.chat_windows.append(chat_display)
-        
-        def on_close():
-            if chat_display in self.chat_windows:
-                self.chat_windows.remove(chat_display)
-            chat_dialog.accept()
-        
-        chat_dialog.finished.connect(on_close)
+        chat_dialog.finished.connect(lambda: self.chat_windows.remove(chat_display) if chat_display in self.chat_windows else None)
         chat_dialog.exec_()
     
     def handle_chat_message(self, message):
@@ -1108,15 +1077,14 @@ class ConferenceClientPyQt5(QMainWindow):
                 pass
     
     def open_file_transfer(self):
-        filepath, _ = QFileDialog.getOpenFileName(self, "Select file to share")
+        filepath, _ = QFileDialog.getOpenFileName(self, "Select file")
         if not filepath:
             return
         
         try:
             import os
-            file_size = os.path.getsize(filepath)
-            if file_size > 10 * 1024 * 1024:
-                QMessageBox.warning(self, "Warning", "File too large! Maximum 10MB")
+            if os.path.getsize(filepath) > 10 * 1024 * 1024:
+                QMessageBox.warning(self, "Warning", "File too large! Max 10MB")
                 return
         except:
             pass
@@ -1128,46 +1096,28 @@ class ConferenceClientPyQt5(QMainWindow):
         layout = QVBoxLayout(file_dialog)
         
         filename = os.path.basename(filepath)
-        
-        file_label = QLabel(f"File: {filename}")
-        file_label.setStyleSheet("font-weight: bold; font-size: 11px;")
-        file_label.setWordWrap(True)
-        layout.addWidget(file_label)
-        
-        recipient_label = QLabel("Send to:")
-        recipient_label.setStyleSheet("font-weight: bold; font-size: 10px;")
-        layout.addWidget(recipient_label)
-        
-        recipient_group = QWidget()
-        recipient_layout = QVBoxLayout(recipient_group)
-        recipient_layout.setContentsMargins(20, 0, 0, 0)
+        layout.addWidget(QLabel(f"File: {filename}"))
+        layout.addWidget(QLabel("Send to:"))
         
         button_group = QButtonGroup(file_dialog)
-        
         everyone_radio = QRadioButton("Everyone")
         everyone_radio.setChecked(True)
-        everyone_radio.setStyleSheet("font-size: 10px;")
         button_group.addButton(everyone_radio)
-        recipient_layout.addWidget(everyone_radio)
+        layout.addWidget(everyone_radio)
         
         recipient_buttons = {'everyone': everyone_radio}
         
         for username in self.participants.keys():
             if username != self.username:
                 radio = QRadioButton(username)
-                radio.setStyleSheet("font-size: 10px;")
                 button_group.addButton(radio)
-                recipient_layout.addWidget(radio)
+                layout.addWidget(radio)
                 recipient_buttons[username] = radio
-        
-        layout.addWidget(recipient_group)
         
         def send_file():
             try:
                 with open(filepath, 'rb') as f:
                     file_data = f.read()
-                
-                file_data_b64 = base64.b64encode(file_data).decode('utf-8')
                 
                 recipient = None
                 for name, radio in recipient_buttons.items():
@@ -1179,30 +1129,25 @@ class ConferenceClientPyQt5(QMainWindow):
                     'type': 'file_transfer',
                     'recipient': recipient,
                     'filename': filename,
-                    'data': file_data_b64
+                    'data': base64.b64encode(file_data).decode('utf-8')
                 })
                 
                 self.tcp_socket.send(message.encode('utf-8'))
                 QMessageBox.information(self, "Success", "File sent!")
                 file_dialog.accept()
             except Exception as e:
-                QMessageBox.critical(self, "Error", f"Could not send:\n{e}")
+                QMessageBox.critical(self, "Error", str(e))
         
-        button_frame = QWidget()
-        button_layout = QHBoxLayout(button_frame)
-        
+        button_layout = QHBoxLayout()
         send_btn = QPushButton("Send")
-        send_btn.setStyleSheet("background-color: #4CAF50; color: white; padding: 8px; font-weight: bold;")
         send_btn.clicked.connect(send_file)
         button_layout.addWidget(send_btn)
         
         cancel_btn = QPushButton("Cancel")
-        cancel_btn.setStyleSheet("background-color: #f44336; color: white; padding: 8px; font-weight: bold;")
         cancel_btn.clicked.connect(file_dialog.reject)
         button_layout.addWidget(cancel_btn)
         
-        layout.addWidget(button_frame)
-        
+        layout.addLayout(button_layout)
         file_dialog.exec_()
     
     def handle_file_transfer(self, message):
@@ -1211,151 +1156,87 @@ class ConferenceClientPyQt5(QMainWindow):
         
         try:
             file_data = base64.b64decode(message['data'])
-            
-            save_path, _ = QFileDialog.getSaveFileName(
-                self,
-                f"Save file from {from_user}",
-                filename
-            )
+            save_path, _ = QFileDialog.getSaveFileName(self, f"Save file from {from_user}", filename)
             
             if save_path:
                 with open(save_path, 'wb') as f:
                     f.write(file_data)
-                QMessageBox.information(self, "Success", f"File saved to:\n{save_path}")
+                QMessageBox.information(self, "Success", f"File saved!")
         except Exception as e:
-            QMessageBox.critical(self, "Error", f"Could not save:\n{e}")
+            QMessageBox.critical(self, "Error", str(e))
     
     def closeEvent(self, event):
-        reply = QMessageBox.question(
-            self,
-            'Leave Meeting',
-            'Are you sure you want to leave the meeting?',
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No
-        )
+        self.running = False
         
-        if reply == QMessageBox.Yes:
-            self.running = False
-            
-            if self.video_enabled and self.cap:
-                self.cap.release()
-            
-            if self.audio_enabled:
-                if self.stream_in:
-                    try:
-                        self.stream_in.stop_stream()
-                        self.stream_in.close()
-                    except:
-                        pass
-                if self.audio_in:
-                    try:
-                        self.audio_in.terminate()
-                    except:
-                        pass
-            
-            if self.stream_out:
-                try:
-                    self.stream_out.stop_stream()
-                    self.stream_out.close()
-                except:
-                    pass
-            if self.audio_out:
-                try:
-                    self.audio_out.terminate()
-                except:
-                    pass
-            
-            if self.tcp_socket:
-                try:
-                    self.tcp_socket.close()
-                except:
-                    pass
-            
-            if self.udp_socket:
-                try:
-                    self.udp_socket.close()
-                except:
-                    pass
-            
-            cv2.destroyAllWindows()
-            event.accept()
-        else:
-            event.ignore()
+        if self.cap:
+            self.cap.release()
+        if self.stream_in:
+            try:
+                self.stream_in.stop_stream()
+                self.stream_in.close()
+            except:
+                pass
+        if self.audio_in:
+            try:
+                self.audio_in.terminate()
+            except:
+                pass
+        if self.stream_out:
+            try:
+                self.stream_out.stop_stream()
+                self.stream_out.close()
+            except:
+                pass
+        if self.audio_out:
+            try:
+                self.audio_out.terminate()
+            except:
+                pass
+        if self.tcp_socket:
+            try:
+                self.tcp_socket.close()
+            except:
+                pass
+        if self.udp_socket:
+            try:
+                self.udp_socket.close()
+            except:
+                pass
+        
+        cv2.destroyAllWindows()
+        event.accept()
 
 class LoginDialog(QDialog):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Join Conference")
         self.setFixedSize(400, 300)
-        
-        # Remove question mark, add minimize/maximize buttons
-        self.setWindowFlags(
-            Qt.Window |
-            Qt.WindowCloseButtonHint |
-            Qt.WindowMinimizeButtonHint |
-            Qt.WindowMaximizeButtonHint
-        )
-        
         self.result_data = None
         
         layout = QVBoxLayout(self)
-        layout.setSpacing(15)
         
         title = QLabel("Conference Login")
         title.setStyleSheet("font-size: 16px; font-weight: bold; color: #2196F3;")
         title.setAlignment(Qt.AlignCenter)
         layout.addWidget(title)
         
-        # Server IP
-        ip_label = QLabel("Server IP:")
-        ip_label.setStyleSheet("font-size: 11px; font-weight: bold;")
-        layout.addWidget(ip_label)
-        
-        self.server_entry = QLineEdit()
-        self.server_entry.setText("127.0.0.1")
-        self.server_entry.setStyleSheet("padding: 8px; font-size: 11px; border: 1px solid #ccc; border-radius: 4px;")
+        layout.addWidget(QLabel("Server IP:"))
+        self.server_entry = QLineEdit("127.0.0.1")
         layout.addWidget(self.server_entry)
         
-        # Server Port
-        port_label = QLabel("Server Port:")
-        port_label.setStyleSheet("font-size: 11px; font-weight: bold;")
-        layout.addWidget(port_label)
-        
-        self.port_entry = QLineEdit()
-        self.port_entry.setText("5555")
-        self.port_entry.setStyleSheet("padding: 8px; font-size: 11px; border: 1px solid #ccc; border-radius: 4px;")
+        layout.addWidget(QLabel("Server Port:"))
+        self.port_entry = QLineEdit("5555")
         layout.addWidget(self.port_entry)
         
-        # Username
-        user_label = QLabel("Username:")
-        user_label.setStyleSheet("font-size: 11px; font-weight: bold;")
-        layout.addWidget(user_label)
-        
+        layout.addWidget(QLabel("Username:"))
         self.username_entry = QLineEdit()
-        self.username_entry.setStyleSheet("padding: 8px; font-size: 11px; border: 1px solid #ccc; border-radius: 4px;")
         self.username_entry.returnPressed.connect(self.connect)
         layout.addWidget(self.username_entry)
         
-        # Connect button
         connect_btn = QPushButton("Connect")
-        connect_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #4CAF50;
-                color: white;
-                padding: 10px;
-                font-size: 12px;
-                font-weight: bold;
-                border-radius: 4px;
-                border: none;
-            }
-            QPushButton:hover {
-                background-color: #45a049;
-            }
-        """)
+        connect_btn.setStyleSheet("background-color: #4CAF50; color: white; padding: 10px; font-weight: bold;")
         connect_btn.clicked.connect(self.connect)
         layout.addWidget(connect_btn)
-        
-        self.setStyleSheet("QDialog { background-color: white; }")
     
     def connect(self):
         server = self.server_entry.text().strip()
@@ -1364,24 +1245,17 @@ class LoginDialog(QDialog):
         
         if server and port and username:
             try:
-                self.result_data = {
-                    'server': server,
-                    'port': int(port),
-                    'username': username
-                }
+                self.result_data = {'server': server, 'port': int(port), 'username': username}
                 self.accept()
             except ValueError:
-                QMessageBox.critical(self, "Error", "Invalid port number")
+                QMessageBox.critical(self, "Error", "Invalid port")
         else:
-            QMessageBox.warning(self, "Warning", "Please fill all fields")
+            QMessageBox.warning(self, "Warning", "Fill all fields")
 
 def main():
     app = QApplication(sys.argv)
-    
-    # Set application style
     app.setStyle('Fusion')
     
-    # Login dialog
     login = LoginDialog()
     if login.exec_() == QDialog.Accepted and login.result_data:
         client = ConferenceClientPyQt5(

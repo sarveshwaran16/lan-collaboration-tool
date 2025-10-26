@@ -333,8 +333,49 @@ class ConferenceServer:
 
 if __name__ == "__main__":
     server = ConferenceServer()
+    print("\n" + "="*50)
+    print("Conference Server Started")
+    print("="*50)
+    print(f"TCP Port: 5555")
+    print(f"UDP Port: 5556")
+    print("\nPress Ctrl+C to stop the server")
+    print("Or type 'quit' and press Enter")
+    print("="*50 + "\n")
+    
+    # Start server in a separate thread
+    server_thread = threading.Thread(target=server.start)
+    server_thread.daemon = True
+    server_thread.start()
+    
     try:
-        server.start()
+        while True:
+            # Check for user input to quit
+            try:
+                import sys
+                import select
+                if sys.platform == 'win32':
+                    # Windows: check for input with timeout
+                    import msvcrt
+                    if msvcrt.kbhit():
+                        cmd = input().strip().lower()
+                        if cmd in ['quit', 'exit', 'q']:
+                            print("\nShutting down server...")
+                            break
+                else:
+                    # Linux/Mac: use select
+                    if select.select([sys.stdin], [], [], 1)[0]:
+                        cmd = input().strip().lower()
+                        if cmd in ['quit', 'exit', 'q']:
+                            print("\nShutting down server...")
+                            break
+            except:
+                pass
+            
+            time.sleep(0.5)
+            
     except KeyboardInterrupt:
-        print("\nShutting down server...")
+        print("\n\nShutting down server...")
+    finally:
         server.stop()
+        print("Server stopped successfully!")
+        print("You can now close this window.\n")

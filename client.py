@@ -1,9 +1,9 @@
 import socket
 import threading
 import json
-from PyQt5.QtWidgets import *
-from PyQt5.QtCore import *
-from PyQt5.QtGui import *
+from PyQt6.QtWidgets import *
+from PyQt6.QtCore import *
+from PyQt6.QtGui import *
 import cv2
 import pyaudio
 import base64
@@ -15,15 +15,20 @@ import sys
 import os
 
 class VideoLabel(QLabel):
-    """Custom label for video display"""
+    """Custom label for video display with modern styling"""
     def __init__(self):
         super().__init__()
-        self.setAlignment(Qt.AlignCenter)
-        self.setStyleSheet("background-color: black; color: white;")
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setStyleSheet("""
+            background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                stop:0 #1a1a2e, stop:1 #16213e);
+            color: white;
+            border-radius: 8px;
+        """)
         self.setScaledContents(False)
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
-class ConferenceClientPyQt5(QMainWindow):
+class ConferenceClient(QMainWindow):
     # Signals for thread-safe GUI updates
     participant_list_signal = pyqtSignal(list)
     video_frame_signal = pyqtSignal(str, object)
@@ -85,121 +90,313 @@ class ConferenceClientPyQt5(QMainWindow):
         self.setup_gui()
         
     def setup_gui(self):
-        self.setWindowTitle(f"Conference - {self.username}")
-        self.setGeometry(100, 100, 1200, 700)
+        self.setWindowTitle(f"🎥 Conference - {self.username}")
+        self.setGeometry(100, 100, 1400, 800)
         
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QHBoxLayout(central_widget)
-        main_layout.setSpacing(10)
-        main_layout.setContentsMargins(10, 10, 10, 10)
+        main_layout.setSpacing(15)
+        main_layout.setContentsMargins(15, 15, 15, 15)
         
-        # Left panel
+        # Left panel with modern styling
         left_widget = QWidget()
+        left_widget.setStyleSheet("""
+            QWidget {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #0f0c29, stop:0.5 #302b63, stop:1 #24243e);
+                border-radius: 12px;
+            }
+        """)
         left_layout = QVBoxLayout(left_widget)
-        left_layout.setSpacing(5)
+        left_layout.setSpacing(10)
         
-        # Video frame
+        # Video frame with gradient border
         self.video_frame = QWidget()
-        self.video_frame.setMinimumSize(640, 640)
-        self.video_frame.setStyleSheet("background-color: black;")
+        self.video_frame.setMinimumSize(720, 720)
+        self.video_frame.setStyleSheet("""
+            QWidget {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                    stop:0 #1a1a2e, stop:1 #16213e);
+                border: 3px solid qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #667eea, stop:1 #764ba2);
+                border-radius: 10px;
+            }
+        """)
         self.video_layout = QGridLayout(self.video_frame)
-        self.video_layout.setSpacing(2)
-        self.video_layout.setContentsMargins(0, 0, 0, 0)
+        self.video_layout.setSpacing(3)
+        self.video_layout.setContentsMargins(5, 5, 5, 5)
         left_layout.addWidget(self.video_frame, stretch=1)
         
-        # Navigation
+        # Navigation with modern buttons
         nav_widget = QWidget()
+        nav_widget.setStyleSheet("background: transparent;")
         nav_layout = QHBoxLayout(nav_widget)
         nav_layout.setContentsMargins(0, 0, 0, 0)
         
         self.prev_btn = QPushButton("◄ Previous")
         self.prev_btn.clicked.connect(self.prev_page)
-        self.prev_btn.setFixedWidth(100)
+        self.prev_btn.setFixedWidth(120)
+        self.prev_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.prev_btn.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #667eea, stop:1 #764ba2);
+                color: white;
+                border: none;
+                border-radius: 8px;
+                padding: 10px;
+                font-weight: bold;
+                font-size: 12px;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #764ba2, stop:1 #667eea);
+            }
+            QPushButton:pressed {
+                background: #5a4b8a;
+            }
+        """)
         nav_layout.addWidget(self.prev_btn)
         
         self.page_label = QLabel("Page 1/1")
-        self.page_label.setAlignment(Qt.AlignCenter)
+        self.page_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.page_label.setStyleSheet("""
+            color: white;
+            font-size: 14px;
+            font-weight: bold;
+            background: transparent;
+        """)
         nav_layout.addWidget(self.page_label)
         
         self.next_btn = QPushButton("Next ►")
         self.next_btn.clicked.connect(self.next_page)
-        self.next_btn.setFixedWidth(100)
+        self.next_btn.setFixedWidth(120)
+        self.next_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.next_btn.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #667eea, stop:1 #764ba2);
+                color: white;
+                border: none;
+                border-radius: 8px;
+                padding: 10px;
+                font-weight: bold;
+                font-size: 12px;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #764ba2, stop:1 #667eea);
+            }
+            QPushButton:pressed {
+                background: #5a4b8a;
+            }
+        """)
         nav_layout.addWidget(self.next_btn)
         
         left_layout.addWidget(nav_widget)
         
-        # Control buttons
+        # Control buttons with vibrant colors and icons
         control_widget = QWidget()
+        control_widget.setStyleSheet("background: transparent;")
         control_layout = QHBoxLayout(control_widget)
-        control_layout.setSpacing(5)
+        control_layout.setSpacing(8)
         control_layout.setContentsMargins(0, 0, 0, 0)
         
-        self.video_btn = QPushButton("Start Video")
+        self.video_btn = QPushButton("📹 Start Video")
         self.video_btn.clicked.connect(self.toggle_video)
-        self.video_btn.setStyleSheet("background-color: #4CAF50; color: white; padding: 8px; font-weight: bold;")
+        self.video_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.video_btn.setToolTip("Toggle camera on/off")
+        self.video_btn.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #56ab2f, stop:1 #a8e063);
+                color: white;
+                border: none;
+                border-radius: 10px;
+                padding: 12px;
+                font-weight: bold;
+                font-size: 11px;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #a8e063, stop:1 #56ab2f);
+                transform: scale(1.05);
+            }
+            QPushButton:pressed {
+                background: #4a9626;
+            }
+        """)
         control_layout.addWidget(self.video_btn)
         
-        self.audio_btn = QPushButton("Start Audio")
+        self.audio_btn = QPushButton("🎤 Start Audio")
         self.audio_btn.clicked.connect(self.toggle_audio)
-        self.audio_btn.setStyleSheet("background-color: #2196F3; color: white; padding: 8px; font-weight: bold;")
+        self.audio_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.audio_btn.setToolTip("Toggle microphone on/off")
+        self.audio_btn.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #2193b0, stop:1 #6dd5ed);
+                color: white;
+                border: none;
+                border-radius: 10px;
+                padding: 12px;
+                font-weight: bold;
+                font-size: 11px;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #6dd5ed, stop:1 #2193b0);
+            }
+            QPushButton:pressed {
+                background: #1c7d96;
+            }
+        """)
         control_layout.addWidget(self.audio_btn)
         
-        self.screen_btn = QPushButton("Share Screen")
+        self.screen_btn = QPushButton("🖥️ Share Screen")
         self.screen_btn.clicked.connect(self.toggle_screen_share)
-        self.screen_btn.setStyleSheet("background-color: #FF9800; color: white; padding: 8px; font-weight: bold;")
+        self.screen_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.screen_btn.setToolTip("Share your screen")
+        self.screen_btn.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #f2994a, stop:1 #f2c94c);
+                color: white;
+                border: none;
+                border-radius: 10px;
+                padding: 12px;
+                font-weight: bold;
+                font-size: 11px;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #f2c94c, stop:1 #f2994a);
+            }
+            QPushButton:pressed {
+                background: #d6843f;
+            }
+        """)
         control_layout.addWidget(self.screen_btn)
         
-        self.chat_btn = QPushButton("Chat")
+        self.chat_btn = QPushButton("💬 Chat")
         self.chat_btn.clicked.connect(self.open_chat)
-        self.chat_btn.setStyleSheet("background-color: #9C27B0; color: white; padding: 8px; font-weight: bold;")
+        self.chat_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.chat_btn.setToolTip("Open chat window")
+        self.chat_btn.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #b92b27, stop:1 #1565C0);
+                color: white;
+                border: none;
+                border-radius: 10px;
+                padding: 12px;
+                font-weight: bold;
+                font-size: 11px;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #1565C0, stop:1 #b92b27);
+            }
+            QPushButton:pressed {
+                background: #a02521;
+            }
+        """)
         control_layout.addWidget(self.chat_btn)
         
-        self.file_btn = QPushButton("Share File")
+        self.file_btn = QPushButton("📁 Share File")
         self.file_btn.clicked.connect(self.open_file_transfer)
-        self.file_btn.setStyleSheet("background-color: #607D8B; color: white; padding: 8px; font-weight: bold;")
+        self.file_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.file_btn.setToolTip("Send a file to participants")
+        self.file_btn.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #614385, stop:1 #516395);
+                color: white;
+                border: none;
+                border-radius: 10px;
+                padding: 12px;
+                font-weight: bold;
+                font-size: 11px;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #516395, stop:1 #614385);
+            }
+            QPushButton:pressed {
+                background: #523a71;
+            }
+        """)
         control_layout.addWidget(self.file_btn)
         
         left_layout.addWidget(control_widget)
         
         main_layout.addWidget(left_widget, stretch=4)
         
-        # Right panel
+        # Right panel with modern participant list
         right_widget = QWidget()
-        right_widget.setMaximumWidth(200)
+        right_widget.setMaximumWidth(250)
+        right_widget.setStyleSheet("""
+            QWidget {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #2c3e50, stop:1 #3498db);
+                border-radius: 12px;
+            }
+        """)
         right_layout = QVBoxLayout(right_widget)
+        right_layout.setContentsMargins(10, 10, 10, 10)
         
-        participants_label = QLabel("Participants")
-        participants_label.setStyleSheet("font-size: 14px; font-weight: bold;")
-        participants_label.setAlignment(Qt.AlignCenter)
+        participants_label = QLabel("👥 Participants")
+        participants_label.setStyleSheet("""
+            font-size: 16px;
+            font-weight: bold;
+            color: white;
+            background: transparent;
+            padding: 10px;
+        """)
+        participants_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         right_layout.addWidget(participants_label)
         
         self.participant_list = QListWidget()
-        self.participant_list.setStyleSheet("font-size: 11px;")
+        self.participant_list.setStyleSheet("""
+            QListWidget {
+                background: rgba(255, 255, 255, 0.1);
+                color: white;
+                border: 2px solid rgba(255, 255, 255, 0.2);
+                border-radius: 8px;
+                font-size: 12px;
+                padding: 5px;
+            }
+            QListWidget::item {
+                padding: 8px;
+                border-radius: 5px;
+                margin: 2px;
+            }
+            QListWidget::item:hover {
+                background: rgba(255, 255, 255, 0.2);
+            }
+            QListWidget::item:selected {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #667eea, stop:1 #764ba2);
+            }
+        """)
         right_layout.addWidget(self.participant_list)
         
         main_layout.addWidget(right_widget, stretch=1)
         
+        # Global stylesheet for the main window
         self.setStyleSheet("""
             QMainWindow {
-                background-color: #2C2C2C;
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                    stop:0 #0f2027, stop:0.5 #203a43, stop:1 #2c5364);
             }
-            QPushButton {
-                border-radius: 4px;
-                min-height: 35px;
+            QToolTip {
+                background-color: #2c3e50;
+                color: white;
+                border: 2px solid #3498db;
+                border-radius: 5px;
+                padding: 5px;
                 font-size: 11px;
-            }
-            QPushButton:hover {
-                opacity: 0.8;
-            }
-            QLabel {
-                color: white;
-            }
-            QListWidget {
-                background-color: #3C3C3C;
-                color: white;
-                border: 1px solid #555;
-                border-radius: 4px;
             }
         """)
         
@@ -224,17 +421,15 @@ class ConferenceClientPyQt5(QMainWindow):
             
             self.running = True
             
-            try:
-                self.audio_out = pyaudio.PyAudio()
-                self.stream_out = self.audio_out.open(
-                    format=pyaudio.paInt16,
-                    channels=1,
-                    rate=16000,
-                    output=True,
-                    frames_per_buffer=2048
-                )
-            except Exception as e:
-                print(f"Audio output error: {e}")
+            # NOTE: audio output (playback) is initialized lazily in
+            # handle_audio_frame() to avoid triggering underlying
+            # PulseAudio/ALSA library initialization during startup.
+            # Creating PyAudio playback streams can abort the process
+            # on some systems/configurations (see PulseAudio assertions).
+            # We will attempt to create playback stream on-demand and
+            # handle failures gracefully so the UI doesn't crash.
+            self.audio_out = None
+            self.stream_out = None
             
             tcp_thread = threading.Thread(target=self.receive_tcp)
             tcp_thread.daemon = True
@@ -247,6 +442,36 @@ class ConferenceClientPyQt5(QMainWindow):
             return True
         except Exception as e:
             QMessageBox.critical(self, "Connection Error", f"Could not connect:\n{e}")
+            return False
+
+    def init_audio_output(self):
+        """Initialize audio playback (PyAudio) on-demand.
+
+        Returns True on success, False on failure.  Failures are
+        handled gracefully to avoid aborting the whole application
+        when underlying audio libraries misbehave.
+        """
+        if self.stream_out and self.audio_out:
+            return True
+        try:
+            self.audio_out = pyaudio.PyAudio()
+            self.stream_out = self.audio_out.open(
+                format=pyaudio.paInt16,
+                channels=1,
+                rate=16000,
+                output=True,
+                frames_per_buffer=2048
+            )
+            return True
+        except Exception as e:
+            print(f"Audio output init error: {e}")
+            try:
+                if self.audio_out:
+                    self.audio_out.terminate()
+            except:
+                pass
+            self.audio_out = None
+            self.stream_out = None
             return False
             
     def receive_tcp(self):
@@ -324,10 +549,38 @@ class ConferenceClientPyQt5(QMainWindow):
     def handle_audio_frame(self, message):
         try:
             audio_data = base64.b64decode(message['audio'])
+
+            # Initialize playback lazily. Some systems fail/abort when
+            # PyAudio playback is created at startup; creating on-demand
+            # reduces this risk and makes failures recoverable.
+            if not self.stream_out:
+                ok = self.init_audio_output()
+                if not ok:
+                    # Could not create playback; drop audio frame silently
+                    return
+
             if self.stream_out and self.stream_out.is_active():
-                self.stream_out.write(audio_data)
+                try:
+                    self.stream_out.write(audio_data)
+                except Exception as e:
+                    # Playback error — clean up gracefully to avoid aborts
+                    print(f"Audio playback error: {e}")
+                    try:
+                        self.stream_out.stop_stream()
+                        self.stream_out.close()
+                    except:
+                        pass
+                    try:
+                        if self.audio_out:
+                            self.audio_out.terminate()
+                    except:
+                        pass
+                    self.stream_out = None
+                    self.audio_out = None
         except Exception as e:
-            pass
+            # Malformed message or decode error
+            print(f"Audio frame handling error: {e}")
+            return
     
     def handle_screen_share_frame(self, message):
         try:
@@ -432,8 +685,13 @@ class ConferenceClientPyQt5(QMainWindow):
             col = idx % cols
             
             cell_widget = QWidget()
-            cell_widget.setStyleSheet("background-color: black; border: 1px solid gray;")
-            cell_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+            cell_widget.setStyleSheet("""
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                    stop:0 #1a1a2e, stop:1 #16213e);
+                border: 2px solid #667eea;
+                border-radius: 8px;
+            """)
+            cell_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
             
             cell_layout = QVBoxLayout(cell_widget)
             cell_layout.setContentsMargins(2, 2, 2, 2)
@@ -441,23 +699,32 @@ class ConferenceClientPyQt5(QMainWindow):
             
             video_label = VideoLabel()
             video_label.setText(username)
-            video_label.setStyleSheet("font-size: 16px; color: white;")
+            video_label.setStyleSheet("""
+                font-size: 18px;
+                color: #ffffff;
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                    stop:0 #1a1a2e, stop:1 #16213e);
+            """)
             cell_layout.addWidget(video_label, stretch=1)
             
             info_widget = QWidget()
-            info_widget.setStyleSheet("background-color: #1a1a1a;")
-            info_widget.setFixedHeight(30)
+            info_widget.setStyleSheet("""
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #667eea, stop:1 #764ba2);
+                border-radius: 5px;
+            """)
+            info_widget.setFixedHeight(35)
             info_layout = QHBoxLayout(info_widget)
-            info_layout.setContentsMargins(5, 2, 5, 2)
+            info_layout.setContentsMargins(8, 2, 8, 2)
             
             name_label = QLabel(username)
-            name_label.setStyleSheet("color: white; font-weight: bold; font-size: 10px;")
+            name_label.setStyleSheet("color: white; font-weight: bold; font-size: 11px; background: transparent;")
             info_layout.addWidget(name_label)
             
             participant_data = self.participants[username]
             mic_status = "🎤" if participant_data['audio'] else "🔇"
             mic_label = QLabel(mic_status)
-            mic_label.setStyleSheet("font-size: 12px;")
+            mic_label.setStyleSheet("font-size: 14px; background: transparent;")
             info_layout.addWidget(mic_label)
             
             info_layout.addStretch()
@@ -483,7 +750,7 @@ class ConferenceClientPyQt5(QMainWindow):
                 frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 height, width, channel = frame_rgb.shape
                 bytes_per_line = 3 * width
-                q_image = QImage(frame_rgb.data, width, height, bytes_per_line, QImage.Format_RGB888)
+                q_image = QImage(frame_rgb.data, width, height, bytes_per_line, QImage.Format.Format_RGB888)
                 
                 video_label = self.video_labels[username]['video_label']
                 cell_widget = self.video_labels[username]['cell_widget']
@@ -497,8 +764,8 @@ class ConferenceClientPyQt5(QMainWindow):
                 scaled_pixmap = pixmap.scaled(
                     available_width,
                     available_height,
-                    Qt.KeepAspectRatio,
-                    Qt.SmoothTransformation
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation
                 )
                 
                 video_label.setPixmap(scaled_pixmap)
@@ -600,10 +867,10 @@ class ConferenceClientPyQt5(QMainWindow):
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             height, width, channel = frame_rgb.shape
             bytes_per_line = 3 * width
-            q_image = QImage(frame_rgb.data, width, height, bytes_per_line, QImage.Format_RGB888)
+            q_image = QImage(frame_rgb.data, width, height, bytes_per_line, QImage.Format.Format_RGB888)
             
             pixmap = QPixmap.fromImage(q_image)
-            scaled_pixmap = pixmap.scaled(self.screen_share_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            scaled_pixmap = pixmap.scaled(self.screen_share_label.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
             self.screen_share_label.setPixmap(scaled_pixmap)
             self.screen_share_label.setText("")
         except Exception as e:
@@ -617,10 +884,10 @@ class ConferenceClientPyQt5(QMainWindow):
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             height, width, channel = frame_rgb.shape
             bytes_per_line = 3 * width
-            q_image = QImage(frame_rgb.data, width, height, bytes_per_line, QImage.Format_RGB888)
+            q_image = QImage(frame_rgb.data, width, height, bytes_per_line, QImage.Format.Format_RGB888)
             
             pixmap = QPixmap.fromImage(q_image)
-            scaled_pixmap = pixmap.scaled(196, 130, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            scaled_pixmap = pixmap.scaled(196, 130, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
             self.presenter_overlay.setPixmap(scaled_pixmap)
             self.presenter_overlay.setText("")
         except Exception as e:
@@ -688,8 +955,26 @@ class ConferenceClientPyQt5(QMainWindow):
                 self.cap.set(cv2.CAP_PROP_FPS, 30)
                 
                 self.video_enabled = True
-                self.video_btn.setText("Stop Video")
-                self.video_btn.setStyleSheet("background-color: #f44336; color: white; padding: 8px; font-weight: bold;")
+                self.video_btn.setText("📹 Stop Video")
+                self.video_btn.setStyleSheet("""
+                    QPushButton {
+                        background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                            stop:0 #eb3349, stop:1 #f45c43);
+                        color: white;
+                        border: none;
+                        border-radius: 10px;
+                        padding: 12px;
+                        font-weight: bold;
+                        font-size: 11px;
+                    }
+                    QPushButton:hover {
+                        background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                            stop:0 #f45c43, stop:1 #eb3349);
+                    }
+                    QPushButton:pressed {
+                        background: #d32f2f;
+                    }
+                """)
                 
                 if self.username not in self.participants:
                     self.participants[self.username] = {'video': True, 'audio': self.audio_enabled, 'frame': None}
@@ -707,8 +992,26 @@ class ConferenceClientPyQt5(QMainWindow):
                 QMessageBox.critical(self, "Error", f"Could not start video:\n{e}")
         else:
             self.video_enabled = False
-            self.video_btn.setText("Start Video")
-            self.video_btn.setStyleSheet("background-color: #4CAF50; color: white; padding: 8px; font-weight: bold;")
+            self.video_btn.setText("📹 Start Video")
+            self.video_btn.setStyleSheet("""
+                QPushButton {
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                        stop:0 #56ab2f, stop:1 #a8e063);
+                    color: white;
+                    border: none;
+                    border-radius: 10px;
+                    padding: 12px;
+                    font-weight: bold;
+                    font-size: 11px;
+                }
+                QPushButton:hover {
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                        stop:0 #a8e063, stop:1 #56ab2f);
+                }
+                QPushButton:pressed {
+                    background: #4a9626;
+                }
+            """)
             
             if self.cap:
                 try:
@@ -760,8 +1063,26 @@ class ConferenceClientPyQt5(QMainWindow):
                         raise Exception("No working audio device found")
                 
                 self.audio_enabled = True
-                self.audio_btn.setText("Stop Audio")
-                self.audio_btn.setStyleSheet("background-color: #f44336; color: white; padding: 8px; font-weight: bold;")
+                self.audio_btn.setText("🎤 Stop Audio")
+                self.audio_btn.setStyleSheet("""
+                    QPushButton {
+                        background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                            stop:0 #eb3349, stop:1 #f45c43);
+                        color: white;
+                        border: none;
+                        border-radius: 10px;
+                        padding: 12px;
+                        font-weight: bold;
+                        font-size: 11px;
+                    }
+                    QPushButton:hover {
+                        background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                            stop:0 #f45c43, stop:1 #eb3349);
+                    }
+                    QPushButton:pressed {
+                        background: #d32f2f;
+                    }
+                """)
                 
                 if self.username not in self.participants:
                     self.participants[self.username] = {'video': self.video_enabled, 'audio': True, 'frame': None}
@@ -779,8 +1100,26 @@ class ConferenceClientPyQt5(QMainWindow):
                 QMessageBox.critical(self, "Error", f"Could not start audio:\n{e}")
         else:
             self.audio_enabled = False
-            self.audio_btn.setText("Start Audio")
-            self.audio_btn.setStyleSheet("background-color: #2196F3; color: white; padding: 8px; font-weight: bold;")
+            self.audio_btn.setText("🎤 Start Audio")
+            self.audio_btn.setStyleSheet("""
+                QPushButton {
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                        stop:0 #2193b0, stop:1 #6dd5ed);
+                    color: white;
+                    border: none;
+                    border-radius: 10px;
+                    padding: 12px;
+                    font-weight: bold;
+                    font-size: 11px;
+                }
+                QPushButton:hover {
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                        stop:0 #6dd5ed, stop:1 #2193b0);
+                }
+                QPushButton:pressed {
+                    background: #1c7d96;
+                }
+            """)
             if self.stream_in:
                 self.stream_in.stop_stream()
                 self.stream_in.close()
@@ -796,8 +1135,26 @@ class ConferenceClientPyQt5(QMainWindow):
     def toggle_screen_share(self):
         if not self.screen_share_enabled:
             self.screen_share_enabled = True
-            self.screen_btn.setText("Stop Sharing")
-            self.screen_btn.setStyleSheet("background-color: #f44336; color: white; padding: 8px; font-weight: bold;")
+            self.screen_btn.setText("🖥️ Stop Sharing")
+            self.screen_btn.setStyleSheet("""
+                QPushButton {
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                        stop:0 #eb3349, stop:1 #f45c43);
+                    color: white;
+                    border: none;
+                    border-radius: 10px;
+                    padding: 12px;
+                    font-weight: bold;
+                    font-size: 11px;
+                }
+                QPushButton:hover {
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                        stop:0 #f45c43, stop:1 #eb3349);
+                }
+                QPushButton:pressed {
+                    background: #d32f2f;
+                }
+            """)
             
             self.screen_share_active = True
             self.screen_share_user = self.username
@@ -812,8 +1169,26 @@ class ConferenceClientPyQt5(QMainWindow):
             screen_thread.start()
         else:
             self.screen_share_enabled = False
-            self.screen_btn.setText("Share Screen")
-            self.screen_btn.setStyleSheet("background-color: #FF9800; color: white; padding: 8px; font-weight: bold;")
+            self.screen_btn.setText("🖥️ Share Screen")
+            self.screen_btn.setStyleSheet("""
+                QPushButton {
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                        stop:0 #f2994a, stop:1 #f2c94c);
+                    color: white;
+                    border: none;
+                    border-radius: 10px;
+                    padding: 12px;
+                    font-weight: bold;
+                    font-size: 11px;
+                }
+                QPushButton:hover {
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                        stop:0 #f2c94c, stop:1 #f2994a);
+                }
+                QPushButton:pressed {
+                    background: #d6843f;
+                }
+            """)
             
             message = json.dumps({'type': 'screen_share', 'action': 'stop', 'username': self.username})
             self.udp_socket.sendto(message.encode('utf-8'), (self.server_host, self.udp_port))
@@ -867,6 +1242,22 @@ class ConferenceClientPyQt5(QMainWindow):
                 self.udp_socket.sendto(message.encode('utf-8'), (self.server_host, self.udp_port))
                 time.sleep(0.05)
             except Exception as e:
+                # On errors during capture or send, stop audio and clean up
+                print(f"Audio capture/send error: {e}")
+                self.audio_enabled = False
+                try:
+                    if self.stream_in:
+                        self.stream_in.stop_stream()
+                        self.stream_in.close()
+                        self.stream_in = None
+                except:
+                    pass
+                try:
+                    if self.audio_in:
+                        self.audio_in.terminate()
+                        self.audio_in = None
+                except:
+                    pass
                 break
     
     def send_screen_share(self):
@@ -974,23 +1365,31 @@ class ConferenceClientPyQt5(QMainWindow):
     
     def open_chat(self):
         chat_dialog = QDialog(self)
-        chat_dialog.setWindowTitle("Chat")
-        chat_dialog.setGeometry(200, 200, 450, 550)
+        chat_dialog.setWindowTitle("💬 Chat")
+        chat_dialog.setGeometry(200, 200, 500, 600)
+        chat_dialog.setStyleSheet("""
+            QDialog {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #0f0c29, stop:0.5 #302b63, stop:1 #24243e);
+            }
+        """)
         
         layout = QVBoxLayout(chat_dialog)
         
-        recipient_label = QLabel("Send to:")
-        recipient_label.setStyleSheet("font-weight: bold; font-size: 11px;")
+        recipient_label = QLabel("📤 Send to:")
+        recipient_label.setStyleSheet("font-weight: bold; font-size: 12px; color: white;")
         layout.addWidget(recipient_label)
         
         recipient_group = QWidget()
+        recipient_group.setStyleSheet("background: transparent;")
         recipient_layout = QVBoxLayout(recipient_group)
         recipient_layout.setContentsMargins(20, 0, 0, 0)
         
         button_group = QButtonGroup(chat_dialog)
         
-        everyone_radio = QRadioButton("Everyone")
+        everyone_radio = QRadioButton("👥 Everyone")
         everyone_radio.setChecked(True)
+        everyone_radio.setStyleSheet("color: white; font-size: 11px;")
         button_group.addButton(everyone_radio)
         recipient_layout.addWidget(everyone_radio)
         
@@ -998,7 +1397,8 @@ class ConferenceClientPyQt5(QMainWindow):
         
         for username in self.participants.keys():
             if username != self.username:
-                radio = QRadioButton(username)
+                radio = QRadioButton(f"👤 {username}")
+                radio.setStyleSheet("color: white; font-size: 11px;")
                 button_group.addButton(radio)
                 recipient_layout.addWidget(radio)
                 recipient_buttons[username] = radio
@@ -1007,7 +1407,16 @@ class ConferenceClientPyQt5(QMainWindow):
         
         chat_display = QTextEdit()
         chat_display.setReadOnly(True)
-        chat_display.setStyleSheet("background-color: #2C2C2C; color: white; border: 1px solid #555;")
+        chat_display.setStyleSheet("""
+            QTextEdit {
+                background: rgba(255, 255, 255, 0.1);
+                color: white;
+                border: 2px solid rgba(102, 126, 234, 0.5);
+                border-radius: 8px;
+                padding: 10px;
+                font-size: 11px;
+            }
+        """)
         
         for msg in self.chat_history:
             chat_display.append(msg.strip())
@@ -1015,10 +1424,24 @@ class ConferenceClientPyQt5(QMainWindow):
         layout.addWidget(chat_display)
         
         message_frame = QWidget()
+        message_frame.setStyleSheet("background: transparent;")
         message_layout = QHBoxLayout(message_frame)
         
         message_entry = QLineEdit()
-        message_entry.setStyleSheet("background-color: #3C3C3C; color: white; padding: 5px;")
+        message_entry.setPlaceholderText("Type your message...")
+        message_entry.setStyleSheet("""
+            QLineEdit {
+                background: rgba(255, 255, 255, 0.15);
+                color: white;
+                border: 2px solid rgba(102, 126, 234, 0.5);
+                border-radius: 8px;
+                padding: 10px;
+                font-size: 11px;
+            }
+            QLineEdit:focus {
+                border: 2px solid #667eea;
+            }
+        """)
         message_layout.addWidget(message_entry)
         
         def send_chat():
@@ -1042,8 +1465,27 @@ class ConferenceClientPyQt5(QMainWindow):
                     except Exception as e:
                         QMessageBox.critical(self, "Error", str(e))
         
-        send_btn = QPushButton("Send")
-        send_btn.setStyleSheet("background-color: #4CAF50; color: white; padding: 5px; font-weight: bold;")
+        send_btn = QPushButton("📤 Send")
+        send_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        send_btn.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #667eea, stop:1 #764ba2);
+                color: white;
+                border: none;
+                border-radius: 8px;
+                padding: 10px 20px;
+                font-weight: bold;
+                font-size: 11px;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #764ba2, stop:1 #667eea);
+            }
+            QPushButton:pressed {
+                background: #5a4b8a;
+            }
+        """)
         send_btn.clicked.connect(send_chat)
         message_layout.addWidget(send_btn)
         
@@ -1052,7 +1494,7 @@ class ConferenceClientPyQt5(QMainWindow):
         
         self.chat_windows.append(chat_display)
         chat_dialog.finished.connect(lambda: self.chat_windows.remove(chat_display) if chat_display in self.chat_windows else None)
-        chat_dialog.exec_()
+        chat_dialog.exec()
     
     def handle_chat_message(self, message):
         from_user = message.get('from', 'Unknown')
@@ -1209,32 +1651,82 @@ class ConferenceClientPyQt5(QMainWindow):
 class LoginDialog(QDialog):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Join Conference")
-        self.setFixedSize(400, 300)
+        self.setWindowTitle("🎥 Join Conference")
+        self.setFixedSize(450, 350)
         self.result_data = None
+        self.setStyleSheet("""
+            QDialog {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                    stop:0 #0f0c29, stop:0.5 #302b63, stop:1 #24243e);
+            }
+            QLabel {
+                color: white;
+            }
+            QLineEdit {
+                background: rgba(255, 255, 255, 0.15);
+                color: white;
+                border: 2px solid rgba(102, 126, 234, 0.5);
+                border-radius: 8px;
+                padding: 10px;
+                font-size: 12px;
+            }
+            QLineEdit:focus {
+                border: 2px solid #667eea;
+            }
+        """)
         
         layout = QVBoxLayout(self)
+        layout.setSpacing(15)
         
-        title = QLabel("Conference Login")
-        title.setStyleSheet("font-size: 16px; font-weight: bold; color: #2196F3;")
-        title.setAlignment(Qt.AlignCenter)
+        title = QLabel("🎥 Conference Login")
+        title.setStyleSheet("""
+            font-size: 22px;
+            font-weight: bold;
+            color: white;
+            background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                stop:0 #667eea, stop:1 #764ba2);
+            -webkit-background-clip: text;
+            padding: 15px;
+        """)
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(title)
         
-        layout.addWidget(QLabel("Server IP:"))
+        layout.addWidget(QLabel("🌐 Server IP:"))
         self.server_entry = QLineEdit("127.0.0.1")
         layout.addWidget(self.server_entry)
         
-        layout.addWidget(QLabel("Server Port:"))
+        layout.addWidget(QLabel("🔌 Server Port:"))
         self.port_entry = QLineEdit("5555")
         layout.addWidget(self.port_entry)
         
-        layout.addWidget(QLabel("Username:"))
+        layout.addWidget(QLabel("👤 Username:"))
         self.username_entry = QLineEdit()
+        self.username_entry.setPlaceholderText("Enter your name...")
         self.username_entry.returnPressed.connect(self.connect)
         layout.addWidget(self.username_entry)
         
-        connect_btn = QPushButton("Connect")
-        connect_btn.setStyleSheet("background-color: #4CAF50; color: white; padding: 10px; font-weight: bold;")
+        connect_btn = QPushButton("🚀 Connect")
+        connect_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        connect_btn.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #667eea, stop:1 #764ba2);
+                color: white;
+                border: none;
+                border-radius: 10px;
+                padding: 15px;
+                font-weight: bold;
+                font-size: 14px;
+                margin-top: 10px;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #764ba2, stop:1 #667eea);
+            }
+            QPushButton:pressed {
+                background: #5a4b8a;
+            }
+        """)
         connect_btn.clicked.connect(self.connect)
         layout.addWidget(connect_btn)
     
@@ -1256,9 +1748,26 @@ def main():
     app = QApplication(sys.argv)
     app.setStyle('Fusion')
     
+    # Set application-wide palette for dark mode
+    palette = QPalette()
+    palette.setColor(QPalette.ColorRole.Window, QColor(53, 53, 53))
+    palette.setColor(QPalette.ColorRole.WindowText, Qt.GlobalColor.white)
+    palette.setColor(QPalette.ColorRole.Base, QColor(35, 35, 35))
+    palette.setColor(QPalette.ColorRole.AlternateBase, QColor(53, 53, 53))
+    palette.setColor(QPalette.ColorRole.ToolTipBase, QColor(25, 25, 25))
+    palette.setColor(QPalette.ColorRole.ToolTipText, Qt.GlobalColor.white)
+    palette.setColor(QPalette.ColorRole.Text, Qt.GlobalColor.white)
+    palette.setColor(QPalette.ColorRole.Button, QColor(53, 53, 53))
+    palette.setColor(QPalette.ColorRole.ButtonText, Qt.GlobalColor.white)
+    palette.setColor(QPalette.ColorRole.BrightText, Qt.GlobalColor.red)
+    palette.setColor(QPalette.ColorRole.Link, QColor(42, 130, 218))
+    palette.setColor(QPalette.ColorRole.Highlight, QColor(42, 130, 218))
+    palette.setColor(QPalette.ColorRole.HighlightedText, Qt.GlobalColor.black)
+    app.setPalette(palette)
+    
     login = LoginDialog()
-    if login.exec_() == QDialog.Accepted and login.result_data:
-        client = ConferenceClientPyQt5(
+    if login.exec() == QDialog.DialogCode.Accepted and login.result_data:
+        client = ConferenceClient(
             login.result_data['server'],
             login.result_data['port'],
             login.result_data['username']
@@ -1266,7 +1775,7 @@ def main():
         
         if client.connect():
             client.show()
-            sys.exit(app.exec_())
+            sys.exit(app.exec())
     else:
         sys.exit(0)
 

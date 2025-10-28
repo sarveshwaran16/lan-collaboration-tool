@@ -13,7 +13,20 @@ import numpy as np
 from mss import mss
 import sys
 import os
-import struct # Added for TCP framing
+
+# Suppress ALSA warnings on Linux
+os.environ['ALSA_CARD'] = 'default'
+os.environ['PULSE_LATENCY_MSEC'] = '60'
+from ctypes import *
+ERROR_HANDLER_FUNC = CFUNCTYPE(None, c_char_p, c_int, c_char_p, c_int, c_char_p)
+def py_error_handler(filename, line, function, err, fmt):
+    pass
+c_error_handler = ERROR_HANDLER_FUNC(py_error_handler)
+try:
+    asound = cdll.LoadLibrary('libasound.so.2')
+    asound.snd_lib_error_set_handler(c_error_handler)
+except:
+    pass
 
 class VideoLabel(QLabel):
     """Custom label for video display with modern styling"""
@@ -35,14 +48,9 @@ class ConferenceClient(QMainWindow):
     video_frame_signal = pyqtSignal(str, object)
     screen_share_start_signal = pyqtSignal(str)
     screen_share_stop_signal = pyqtSignal()
-    screen_share_frame_signal = pyqtSignal(str, object)
+    screen_share_frame_signal = pyqtSignal(object)
     chat_message_signal = pyqtSignal(dict)
-    
-    # New signals for file transfers
-    file_offer_signal = pyqtSignal(dict)
-    file_chunk_signal = pyqtSignal(dict)
-    file_end_signal = pyqtSignal(dict)
-    file_accept_signal = pyqtSignal(dict)
+    file_transfer_signal = pyqtSignal(dict)
     
     def __init__(self, server_host, server_port, username):
         super().__init__()
@@ -78,10 +86,6 @@ class ConferenceClient(QMainWindow):
         self.chat_history = []
         self.shared_screen_frame = None
         
-        # File transfer tracking
-        self.pending_transfers = {} # {filename: filepath}
-        self.incoming_files = {}    # {filename: file_handle}
-        
         # Video display
         self.video_labels = {}
         self.screen_share_label = None
@@ -95,12 +99,7 @@ class ConferenceClient(QMainWindow):
         self.screen_share_stop_signal.connect(self.handle_screen_share_stop)
         self.screen_share_frame_signal.connect(self.update_screen_share_display)
         self.chat_message_signal.connect(self.handle_chat_message)
-        
-        # Connect new file signals
-        self.file_offer_signal.connect(self.handle_file_offer)
-        self.file_chunk_signal.connect(self.handle_file_chunk)
-        self.file_end_signal.connect(self.handle_file_end)
-        self.file_accept_signal.connect(self.handle_file_accept)
+        self.file_transfer_signal.connect(self.handle_file_transfer)
         
         self.setup_gui()
         
@@ -188,7 +187,25 @@ class ConferenceClient(QMainWindow):
         self.next_btn.clicked.connect(self.next_page)
         self.next_btn.setFixedWidth(120)
         self.next_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.next_btn.setStyleSheet(self.prev_btn.styleSheet()) # Reuse style
+        self.next_btn.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #667eea, stop:1 #764ba2);
+                color: white;
+                border: none;
+                border-radius: 8px;
+                padding: 10px;
+                font-weight: bold;
+                font-size: 12px;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #764ba2, stop:1 #667eea);
+            }
+            QPushButton:pressed {
+                background: #5a4b8a;
+            }
+        """)
         nav_layout.addWidget(self.next_btn)
         
         left_layout.addWidget(nav_widget)
@@ -218,6 +235,7 @@ class ConferenceClient(QMainWindow):
             QPushButton:hover {
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                     stop:0 #a8e063, stop:1 #56ab2f);
+                
             }
             QPushButton:pressed {
                 background: #4a9626;
@@ -401,27 +419,29 @@ class ConferenceClient(QMainWindow):
             self.tcp_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.tcp_socket.connect((self.server_host, self.tcp_port))
             
-            # First message is simple JSON for registration
             message = json.dumps({'username': self.username})
             self.tcp_socket.send(message.encode('utf-8'))
             
-            # All subsequent messages will use framing, starting with this one
-            msg = self.receive_tcp_message()
-            if not msg or msg.get('type') != 'connection_info':
-                raise Exception("Failed to get connection info from server")
-                
-            self.udp_port = msg.get('udp_port')
+            data = self.tcp_socket.recv(4096).decode('utf-8')
+            msg = json.loads(data)
+            self.udp_port = msg.get('udp_port', 5556)
             
             self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             self.udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 2097152)
             self.udp_socket.bind(('', 0))
             
-            # Send UDP registration packet (as JSON)
             register_msg = json.dumps({'type': 'register', 'username': self.username})
             self.udp_socket.sendto(register_msg.encode('utf-8'), (self.server_host, self.udp_port))
             
             self.running = True
             
+            # NOTE: audio output (playback) is initialized lazily in
+            # handle_audio_frame() to avoid triggering underlying
+            # PulseAudio/ALSA library initialization during startup.
+            # Creating PyAudio playback streams can abort the process
+            # on some systems/configurations (see PulseAudio assertions).
+            # We will attempt to create playback stream on-demand and
+            # handle failures gracefully so the UI doesn't crash.
             self.audio_out = None
             self.stream_out = None
             
@@ -439,192 +459,196 @@ class ConferenceClient(QMainWindow):
             return False
 
     def init_audio_output(self):
-        """Initialize audio playback (PyAudio) on-demand."""
+        """Initialize audio playback (PyAudio) on-demand.
+
+        Returns True on success, False on failure.  Failures are
+        handled gracefully to avoid aborting the whole application
+        when underlying audio libraries misbehave.
+        """
         if self.stream_out and self.audio_out:
             return True
+        
         try:
             self.audio_out = pyaudio.PyAudio()
-            self.stream_out = self.audio_out.open(
-                format=pyaudio.paInt16,
-                channels=1,
-                rate=16000,
-                output=True,
-                frames_per_buffer=2048
-            )
-            return True
+            
+            # Try default device first
+            try:
+                self.stream_out = self.audio_out.open(
+                    format=pyaudio.paInt16,
+                    channels=1,
+                    rate=16000,
+                    output=True,
+                    frames_per_buffer=2048,
+                    stream_callback=None
+                )
+                print("[SUCCESS] Audio output initialized with default device")
+                return True
+            except Exception as e:
+                print(f"[WARN] Default audio output failed: {e}")
+                
+                # Try to find a working output device
+                device_count = self.audio_out.get_device_count()
+                print(f"[INFO] Searching through {device_count} audio devices...")
+                
+                for i in range(device_count):
+                    try:
+                        device_info = self.audio_out.get_device_info_by_index(i)
+                        
+                        # Skip input-only devices
+                        if device_info['maxOutputChannels'] < 1:
+                            continue
+                        
+                        print(f"[TRYING] Device {i}: {device_info['name']}")
+                        
+                        self.stream_out = self.audio_out.open(
+                            format=pyaudio.paInt16,
+                            channels=1,
+                            rate=16000,
+                            output=True,
+                            output_device_index=i,
+                            frames_per_buffer=2048
+                        )
+                        print(f"[SUCCESS] Audio output initialized with device {i}: {device_info['name']}")
+                        return True
+                        
+                    except Exception as dev_error:
+                        print(f"[FAIL] Device {i} failed: {dev_error}")
+                        continue
+                
+                # If all devices fail, raise exception
+                raise Exception("No working audio output device found")
+                
         except Exception as e:
-            print(f"Audio output init error: {e}")
+            print(f"[ERROR] Audio output init error: {e}")
             try:
                 if self.audio_out:
                     self.audio_out.terminate()
-            except: pass
+            except:
+                pass
             self.audio_out = None
             self.stream_out = None
             return False
-
-    # --- New TCP Helper Functions ---
-    def send_tcp(self, message_dict):
-        """Encodes and sends a JSON message with a 4-byte length prefix."""
-        if not self.running or not self.tcp_socket:
-            return
-        try:
-            message_json = json.dumps(message_dict).encode('utf-8')
-            message_length = struct.pack('!I', len(message_json)) # 4-byte network-order unsigned int
-            self.tcp_socket.sendall(message_length + message_json)
-        except Exception as e:
-            print(f"Error sending TCP message: {e}")
-            self.running = False # Assume connection is dead
-
-    def receive_tcp_message(self):
-        """Receives and decodes one complete JSON message."""
-        try:
-            # Read the 4-byte length prefix
-            raw_length = self.tcp_socket.recv(4)
-            if not raw_length:
-                return None # Connection closed
             
-            message_length = struct.unpack('!I', raw_length)[0]
-            
-            # Read the full message
-            message_data = b""
-            while len(message_data) < message_length:
-                chunk = self.tcp_socket.recv(message_length - len(message_data))
-                if not chunk:
-                    return None # Connection closed
-                message_data += chunk
-                
-            return json.loads(message_data.decode('utf-8'))
-        except Exception as e:
-            print(f"Error receiving TCP message: {e}")
-            self.running = False
-            return None
-    # --- End TCP Helper Functions ---
-
     def receive_tcp(self):
+        buffer = ""
         while self.running:
             try:
-                message = self.receive_tcp_message()
-                if message is None:
-                    break # Server disconnected
+                data = self.tcp_socket.recv(65536)
+                if not data:
+                    break
                 
-                msg_type = message.get('type')
+                buffer += data.decode('utf-8')
                 
-                if msg_type == 'participant_list':
-                    self.participant_list_signal.emit(message['participants'])
-                elif msg_type == 'chat':
-                    self.chat_message_signal.emit(message)
-                
-                # Handle file transfer messages
-                elif msg_type == 'file_offer':
-                    self.file_offer_signal.emit(message)
-                elif msg_type == 'file_accept':
-                    self.file_accept_signal.emit(message)
-                elif msg_type == 'file_chunk':
-                    self.file_chunk_signal.emit(message)
-                elif msg_type == 'file_end':
-                    self.file_end_signal.emit(message)
-                elif msg_type == 'pong':
-                    pass # Keep-alive response
+                while True:
+                    try:
+                        message, idx = json.JSONDecoder().raw_decode(buffer)
+                        buffer = buffer[idx:].lstrip()
+                        
+                        msg_type = message.get('type')
+                        
+                        if msg_type == 'participant_list':
+                            self.participant_list_signal.emit(message['participants'])
+                        elif msg_type == 'chat':
+                            self.chat_message_signal.emit(message)
+                        elif msg_type == 'file_transfer':
+                            self.file_transfer_signal.emit(message)
+                            
+                    except json.JSONDecodeError:
+                        break
                         
             except Exception as e:
                 if self.running:
                     print(f"TCP error: {e}")
                 break
-        
-        self.running = False
-        print("TCP connection lost.")
-
+    
     def receive_udp(self):
         while self.running:
             try:
                 data, addr = self.udp_socket.recvfrom(131072)
+                message = json.loads(data.decode('utf-8'))
+                msg_type = message.get('type')
                 
-                # Try to parse as JSON first (for screen share control)
-                try:
-                    message = json.loads(data.decode('utf-8'))
-                    msg_type = message.get('type')
+                if msg_type == 'video_frame':
+                    self.handle_video_frame(message)
+                elif msg_type == 'audio_frame':
+                    self.handle_audio_frame(message)
+                elif msg_type == 'screen_share':
+                    action = message.get('action')
                     username = message.get('username')
                     
-                    if msg_type == 'screen_share':
-                        action = message.get('action')
-                        if action == 'start' and username != self.username:
+                    if action == 'start':
+                        if username != self.username:
                             self.screen_share_start_signal.emit(username)
-                        elif action == 'stop':
-                            self.screen_share_stop_signal.emit()
-                    continue
-
-                except (json.JSONDecodeError, UnicodeDecodeError):
-                    # Not JSON, so it's a binary media packet. This is normal.
-                    pass
-
-                # Handle binary media packets
-                packet_type = data[0]
-                username_len = data[1]
-                username_end_idx = 2 + username_len
-                username = data[2:username_end_idx].decode('utf-8')
-                payload = data[username_end_idx:]
-
-                if packet_type == 1: # Video
-                    self.handle_video_frame(username, payload)
-                elif packet_type == 2: # Audio
-                    if username != self.username:
-                        self.handle_audio_frame(payload)
-                elif packet_type == 3: # Screen Share Frame
-                    self.handle_screen_share_frame(username, payload)
+                    elif action == 'stop':
+                        self.screen_share_stop_signal.emit()
+                    elif action == 'frame':
+                        self.handle_screen_share_frame(message)
                     
+            except json.JSONDecodeError:
+                continue
             except Exception as e:
                 if self.running:
                     print(f"UDP error: {e}")
     
-    def handle_video_frame(self, username, payload):
+    def handle_video_frame(self, message):
+        username = message.get('username')
         if username and username in self.participants:
             try:
-                frame = cv2.imdecode(np.frombuffer(payload, np.uint8), cv2.IMREAD_COLOR)
-                if frame is not None:
-                    self.participants[username]['frame'] = frame
-                    self.video_frame_signal.emit(username, frame)
+                frame_data = base64.b64decode(message['frame'])
+                frame = cv2.imdecode(np.frombuffer(frame_data, np.uint8), cv2.IMREAD_COLOR)
+                self.participants[username]['frame'] = frame
+                self.video_frame_signal.emit(username, frame)
             except Exception as e:
                 print(f"Video frame error: {e}")
             
-    def handle_audio_frame(self, payload):
+    def handle_audio_frame(self, message):
         try:
+            audio_data = base64.b64decode(message['audio'])
+
+            # Initialize playback lazily. Some systems fail/abort when
+            # PyAudio playback is created at startup; creating on-demand
+            # reduces this risk and makes failures recoverable.
             if not self.stream_out:
                 ok = self.init_audio_output()
                 if not ok:
-                    return # Can't play audio
+                    # Could not create playback; drop audio frame silently
+                    return
 
             if self.stream_out and self.stream_out.is_active():
-                self.stream_out.write(payload)
+                try:
+                    self.stream_out.write(audio_data)
+                except Exception as e:
+                    # Playback error — clean up gracefully to avoid aborts
+                    print(f"Audio playback error: {e}")
+                    try:
+                        self.stream_out.stop_stream()
+                        self.stream_out.close()
+                    except:
+                        pass
+                    try:
+                        if self.audio_out:
+                            self.audio_out.terminate()
+                    except:
+                        pass
+                    self.stream_out = None
+                    self.audio_out = None
         except Exception as e:
-            # Playback error, try to reset stream
-            print(f"Audio playback error: {e}")
-            try:
-                self.stream_out.stop_stream()
-                self.stream_out.close()
-            except: pass
-            try:
-                if self.audio_out:
-                    self.audio_out.terminate()
-            except: pass
-            self.stream_out = None
-            self.audio_out = None
-            
-    def handle_screen_share_frame(self, username, payload):
-        if not self.screen_share_active or self.screen_share_user != username:
+            # Malformed message or decode error
+            print(f"Audio frame handling error: {e}")
             return
+    
+    def handle_screen_share_frame(self, message):
         try:
-            frame = cv2.imdecode(np.frombuffer(payload, np.uint8), cv2.IMREAD_COLOR)
-            if frame is not None:
-                self.shared_screen_frame = frame
-                if self.current_page == 0:
-                    self.screen_share_frame_signal.emit(username, frame)
+            frame_data = base64.b64decode(message['frame'])
+            frame = cv2.imdecode(np.frombuffer(frame_data, np.uint8), cv2.IMREAD_COLOR)
+            self.shared_screen_frame = frame
+            
+            if self.current_page == 0 and self.screen_share_active:
+                self.screen_share_frame_signal.emit(frame)
         except Exception as e:
             pass
     
-    # --- GUI Update Functions (Mostly Unchanged) ---
-    
     def update_participant_list(self, participants):
-        # (This function is unchanged from your original code)
         for p in participants:
             username = p['username']
             if username not in self.participants:
@@ -656,7 +680,7 @@ class ConferenceClient(QMainWindow):
             self.update_video_display()
     
     def update_video_display(self):
-        # (This function is unchanged from your original code)
+        # Clear existing
         while self.video_layout.count():
             item = self.video_layout.takeAt(0)
             if item.widget():
@@ -679,6 +703,7 @@ class ConferenceClient(QMainWindow):
             participant_page = self.current_page
             total_pages = max(1, (total_participants - 1) // self.participants_per_page + 1)
         
+        # Auto-adjust current page if invalid
         if self.current_page >= total_pages:
             self.current_page = max(0, total_pages - 1)
             participant_page = self.current_page if not self.screen_share_active else self.current_page - 1
@@ -692,12 +717,23 @@ class ConferenceClient(QMainWindow):
             self.page_label.setText(f"Page {self.current_page + 1}/{total_pages}")
             return
         
-        if num_participants == 1: rows, cols = 1, 1
-        elif num_participants == 2: rows, cols = 1, 2
-        else: rows, cols = 2, 2
+        # Smart layout for FULL screen utilization
+        if num_participants == 1:
+            rows, cols = 1, 1
+        elif num_participants == 2:
+            rows, cols = 1, 2
+        elif num_participants == 3:
+            rows, cols = 2, 2  # 2x2 grid, last cell empty
+        elif num_participants == 4:
+            rows, cols = 2, 2
+        else:
+            rows, cols = 2, 2
         
-        for i in range(rows): self.video_layout.setRowStretch(i, 1)
-        for i in range(cols): self.video_layout.setColumnStretch(i, 1)
+        # Set grid stretch FIRST
+        for i in range(rows):
+            self.video_layout.setRowStretch(i, 1)
+        for i in range(cols):
+            self.video_layout.setColumnStretch(i, 1)
         
         for idx, username in enumerate(page_participants):
             row = idx // cols
@@ -764,7 +800,6 @@ class ConferenceClient(QMainWindow):
         self.page_label.setText(f"Page {self.current_page + 1}/{total_pages}")
     
     def update_video_frame(self, username, frame):
-        # (This function is unchanged from your original code)
         if username in self.video_labels:
             try:
                 frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -775,6 +810,7 @@ class ConferenceClient(QMainWindow):
                 video_label = self.video_labels[username]['video_label']
                 cell_widget = self.video_labels[username]['cell_widget']
                 
+                # Get actual cell size
                 cell_size = cell_widget.size()
                 available_width = max(cell_size.width() - 10, 100)
                 available_height = max(cell_size.height() - 40, 100)
@@ -793,7 +829,7 @@ class ConferenceClient(QMainWindow):
                 pass
     
     def display_screen_share(self):
-        # (This function is unchanged from your original code)
+        # Clear existing
         while self.video_layout.count():
             item = self.video_layout.takeAt(0)
             if item.widget():
@@ -804,32 +840,37 @@ class ConferenceClient(QMainWindow):
         self.video_labels.clear()
         QApplication.processEvents()
         
+        # Main container
         main_container = QWidget()
         main_container.setStyleSheet("background-color: black;")
         main_layout = QVBoxLayout(main_container)
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
         
+        # Info bar
         self.screen_share_info = QLabel(f"🖥️ Screen shared by: {self.screen_share_user}")
         self.screen_share_info.setStyleSheet("color: white; background-color: #1a1a1a; font-size: 14px; font-weight: bold; padding: 10px;")
         self.screen_share_info.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.screen_share_info.setFixedHeight(40)
         main_layout.addWidget(self.screen_share_info)
         
+        # Screen + overlay container
         screen_container = QWidget()
         screen_container.setStyleSheet("background-color: black;")
-        screen_container_layout = QStackedLayout(screen_container)
+        screen_container_layout = QStackedLayout(screen_container)  # Use stacked to overlay
         
+        # Screen share label (background)
         self.screen_share_label = VideoLabel()
         self.screen_share_label.setText("Loading screen share...")
         self.screen_share_label.setStyleSheet("color: gray; font-size: 16px;")
         screen_container_layout.addWidget(self.screen_share_label)
         
+        # Presenter overlay (bottom-right, small)
         if self.screen_share_user in self.participants:
             overlay_frame = QFrame(screen_container)
             overlay_frame.setStyleSheet("background-color: rgba(0, 0, 0, 180); border: 2px solid #4CAF50; border-radius: 5px;")
             overlay_frame.setFixedSize(200, 150)
-            overlay_frame.move(10, 10)
+            overlay_frame.move(10, 10)  # Will be repositioned on resize
             
             overlay_layout = QVBoxLayout(overlay_frame)
             overlay_layout.setContentsMargins(2, 2, 2, 2)
@@ -842,9 +883,10 @@ class ConferenceClient(QMainWindow):
             
             presenter_name = QLabel(self.screen_share_user)
             presenter_name.setStyleSheet("color: white; font-size: 9px; font-weight: bold; background-color: #1a1a1a; padding: 2px;")
-            presenter_name.setAlignment(Qt.AlignCenter)
+            presenter_name.setAlignment(Qt.AlignmentFlag.AlignCenter)
             overlay_layout.addWidget(presenter_name)
             
+            # Position overlay at bottom-right
             def position_overlay():
                 if screen_container.isVisible():
                     x = screen_container.width() - overlay_frame.width() - 10
@@ -852,17 +894,19 @@ class ConferenceClient(QMainWindow):
                     overlay_frame.move(max(10, x), max(10, y))
             
             screen_container.resizeEvent = lambda event: position_overlay()
-            overlay_frame.raise_()
+            overlay_frame.raise_()  # Bring to front
         
         main_layout.addWidget(screen_container, stretch=1)
         
+        # Add to grid
         self.video_layout.addWidget(main_container, 0, 0)
         self.video_layout.setRowStretch(0, 1)
         self.video_layout.setColumnStretch(0, 1)
         
         if self.shared_screen_frame is not None:
-            self.update_screen_share_display(self.screen_share_user, self.shared_screen_frame)
+            self.update_screen_share_display(self.shared_screen_frame)
         
+        # Update presenter overlay if they have video
         if self.screen_share_user in self.participants and self.participants[self.screen_share_user]['frame'] is not None:
             self.update_presenter_overlay(self.participants[self.screen_share_user]['frame'])
         
@@ -870,11 +914,11 @@ class ConferenceClient(QMainWindow):
         total_pages = 1 + max(1, (len(participant_list) - 1) // self.participants_per_page + 1)
         self.page_label.setText(f"Page 1/{total_pages} - Screen Share")
     
-    def update_screen_share_display(self, username, frame):
-        # (This function is unchanged from your original code)
-        if not self.screen_share_label or username != self.screen_share_user:
-            return
+    def update_screen_share_display(self, frame):
         try:
+            if not self.screen_share_label:
+                return
+                
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             height, width, channel = frame_rgb.shape
             bytes_per_line = 3 * width
@@ -888,9 +932,10 @@ class ConferenceClient(QMainWindow):
             pass
     
     def update_presenter_overlay(self, frame):
-        # (This function is unchanged from your original code)
-        if not self.presenter_overlay: return
         try:
+            if not self.presenter_overlay:
+                return
+            
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             height, width, channel = frame_rgb.shape
             bytes_per_line = 3 * width
@@ -904,14 +949,12 @@ class ConferenceClient(QMainWindow):
             pass
     
     def hide_screen_share(self):
-        # (This function is unchanged from your original code)
         self.screen_share_label = None
         self.screen_share_info = None
         self.presenter_overlay = None
         self.update_video_display()
     
     def handle_screen_share_start(self, username):
-        # (This function is unchanged from your original code)
         self.screen_share_active = True
         self.screen_share_user = username
         self.current_page = 0
@@ -919,7 +962,6 @@ class ConferenceClient(QMainWindow):
         self.display_screen_share()
     
     def handle_screen_share_stop(self):
-        # (This function is unchanged from your original code)
         self.screen_share_active = False
         self.screen_share_user = None
         self.shared_screen_frame = None
@@ -927,7 +969,6 @@ class ConferenceClient(QMainWindow):
         self.hide_screen_share()
     
     def prev_page(self):
-        # (This function is unchanged from your original code)
         if self.current_page > 0:
             self.current_page -= 1
             if self.screen_share_active and self.current_page == 0:
@@ -936,7 +977,6 @@ class ConferenceClient(QMainWindow):
                 self.update_video_display()
     
     def next_page(self):
-        # (This function is unchanged from your original code)
         if self.screen_share_active:
             total_pages = 1 + max(1, (len(self.participants) - 1) // self.participants_per_page + 1)
         else:
@@ -946,14 +986,13 @@ class ConferenceClient(QMainWindow):
             self.current_page += 1
             self.update_video_display()
     
-    # --- Media Toggles (Updated) ---
-    
     def toggle_video(self):
         if not self.video_enabled:
             try:
-                # (Platform-specific logic unchanged)
+                # Linux-compatible camera opening
                 import platform
                 if platform.system() == "Linux":
+                    # Try V4L2 backend first on Linux
                     self.cap = cv2.VideoCapture(0, cv2.CAP_V4L2)
                     if not self.cap.isOpened():
                         self.cap = cv2.VideoCapture(0)
@@ -963,7 +1002,8 @@ class ConferenceClient(QMainWindow):
                         self.cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
                 
                 if not self.cap.isOpened():
-                    raise Exception("Could not open camera")
+                    QMessageBox.critical(self, "Error", "Could not open camera")
+                    return
                 
                 self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
                 self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
@@ -975,14 +1015,20 @@ class ConferenceClient(QMainWindow):
                     QPushButton {
                         background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                             stop:0 #eb3349, stop:1 #f45c43);
-                        color: white; border: none; border-radius: 10px;
-                        padding: 12px; font-weight: bold; font-size: 11px;
+                        color: white;
+                        border: none;
+                        border-radius: 10px;
+                        padding: 12px;
+                        font-weight: bold;
+                        font-size: 11px;
                     }
                     QPushButton:hover {
                         background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                             stop:0 #f45c43, stop:1 #eb3349);
                     }
-                    QPushButton:pressed { background: #d32f2f; }
+                    QPushButton:pressed {
+                        background: #d32f2f;
+                    }
                 """)
                 
                 if self.username not in self.participants:
@@ -990,7 +1036,8 @@ class ConferenceClient(QMainWindow):
                 else:
                     self.participants[self.username]['video'] = True
                 
-                self.send_tcp({'type': 'status_update', 'video': True})
+                message = json.dumps({'type': 'status_update', 'video': True})
+                self.tcp_socket.send(message.encode('utf-8'))
                 
                 video_thread = threading.Thread(target=self.send_video)
                 video_thread.daemon = True
@@ -1005,62 +1052,90 @@ class ConferenceClient(QMainWindow):
                 QPushButton {
                     background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                         stop:0 #56ab2f, stop:1 #a8e063);
-                    color: white; border: none; border-radius: 10px;
-                    padding: 12px; font-weight: bold; font-size: 11px;
+                    color: white;
+                    border: none;
+                    border-radius: 10px;
+                    padding: 12px;
+                    font-weight: bold;
+                    font-size: 11px;
                 }
                 QPushButton:hover {
                     background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                         stop:0 #a8e063, stop:1 #56ab2f);
                 }
-                QPushButton:pressed { background: #4a9626; }
+                QPushButton:pressed {
+                    background: #4a9626;
+                }
             """)
             
             if self.cap:
-                try: self.cap.release()
-                except: pass
+                try:
+                    self.cap.release()
+                except:
+                    pass
                 self.cap = None
             
             if self.username in self.participants:
                 self.participants[self.username]['video'] = False
                 self.participants[self.username]['frame'] = None
             
-            self.send_tcp({'type': 'status_update', 'video': False})
+            message = json.dumps({'type': 'status_update', 'video': False})
+            self.tcp_socket.send(message.encode('utf-8'))
     
     def toggle_audio(self):
-        """Robust audio toggle for Linux compatibility."""
         if not self.audio_enabled:
             try:
                 self.audio_in = pyaudio.PyAudio()
-                self.stream_in = None
                 
-                # Try default device first
+                # Linux-compatible: try to find working input device
+                input_device_index = None
+                
+                # First try default device
                 try:
                     self.stream_in = self.audio_in.open(
-                        format=pyaudio.paInt16, channels=1, rate=16000,
-                        input=True, frames_per_buffer=2048
+                        format=pyaudio.paInt16,
+                        channels=1,
+                        rate=16000,
+                        input=True,
+                        frames_per_buffer=2048
                     )
-                    print("Using default audio device.")
+                    print("[SUCCESS] Audio input initialized with default device")
+                    
                 except Exception as e:
-                    print(f"Default audio device failed: {e}. Scanning devices...")
-                    # If default fails, scan for a working device
+                    print(f"[WARN] Default audio input failed: {e}")
+                    
+                    # Search for working input device
                     device_count = self.audio_in.get_device_count()
+                    print(f"[INFO] Searching through {device_count} audio devices for input...")
+                    
                     for i in range(device_count):
                         try:
-                            info = self.audio_in.get_device_info_by_index(i)
-                            if info['maxInputChannels'] > 0:
-                                # Found a potential input device
-                                print(f"Trying device {i}: {info['name']}...")
-                                self.stream_in = self.audio_in.open(
-                                    format=pyaudio.paInt16, channels=1, rate=16000,
-                                    input=True, frames_per_buffer=2048,
-                                    input_device_index=i
-                                )
-                                print(f"Successfully opened audio device {i}")
-                                break # Success
-                        except Exception as e:
-                            print(f"Device {i} failed: {e}")
+                            device_info = self.audio_in.get_device_info_by_index(i)
+                            
+                            # Skip output-only devices
+                            if device_info['maxInputChannels'] < 1:
+                                continue
+                            
+                            print(f"[TRYING] Input Device {i}: {device_info['name']}")
+                            
+                            # Try to open this device
+                            self.stream_in = self.audio_in.open(
+                                format=pyaudio.paInt16,
+                                channels=1,
+                                rate=16000,
+                                input=True,
+                                frames_per_buffer=2048,
+                                input_device_index=i
+                            )
+                            print(f"[SUCCESS] Audio input initialized with device {i}: {device_info['name']}")
+                            input_device_index = i
+                            break
+                            
+                        except Exception as dev_error:
+                            print(f"[FAIL] Input Device {i} failed: {dev_error}")
                             continue
                     
+                    # If no device worked
                     if not self.stream_in:
                         raise Exception("No working audio input device found")
                 
@@ -1070,14 +1145,20 @@ class ConferenceClient(QMainWindow):
                     QPushButton {
                         background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                             stop:0 #eb3349, stop:1 #f45c43);
-                        color: white; border: none; border-radius: 10px;
-                        padding: 12px; font-weight: bold; font-size: 11px;
+                        color: white;
+                        border: none;
+                        border-radius: 10px;
+                        padding: 12px;
+                        font-weight: bold;
+                        font-size: 11px;
                     }
                     QPushButton:hover {
                         background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                             stop:0 #f45c43, stop:1 #eb3349);
                     }
-                    QPushButton:pressed { background: #d32f2f; }
+                    QPushButton:pressed {
+                        background: #d32f2f;
+                    }
                 """)
                 
                 if self.username not in self.participants:
@@ -1085,19 +1166,15 @@ class ConferenceClient(QMainWindow):
                 else:
                     self.participants[self.username]['audio'] = True
                 
-                self.send_tcp({'type': 'status_update', 'audio': True})
+                message = json.dumps({'type': 'status_update', 'audio': True})
+                self.tcp_socket.send(message.encode('utf-8'))
                 
                 audio_thread = threading.Thread(target=self.send_audio)
                 audio_thread.daemon = True
                 audio_thread.start()
                 
             except Exception as e:
-                QMessageBox.critical(self, "Error", f"Could not start audio:\n{e}")
-                if self.audio_in:
-                    try: self.audio_in.terminate()
-                    except: pass
-                self.audio_in = None
-                self.stream_in = None
+                QMessageBox.critical(self, "Error", f"Could not start audio:\n{e}\n\nTry checking:\n- Microphone permissions\n- PulseAudio is running\n- No other app is using the mic")
         else:
             self.audio_enabled = False
             self.audio_btn.setText("🎤 Start Audio")
@@ -1105,28 +1182,38 @@ class ConferenceClient(QMainWindow):
                 QPushButton {
                     background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                         stop:0 #2193b0, stop:1 #6dd5ed);
-                    color: white; border: none; border-radius: 10px;
-                    padding: 12px; font-weight: bold; font-size: 11px;
+                    color: white;
+                    border: none;
+                    border-radius: 10px;
+                    padding: 12px;
+                    font-weight: bold;
+                    font-size: 11px;
                 }
                 QPushButton:hover {
                     background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                         stop:0 #6dd5ed, stop:1 #2193b0);
                 }
-                QPushButton:pressed { background: #1c7d96; }
+                QPushButton:pressed {
+                    background: #1c7d96;
+                }
             """)
             if self.stream_in:
                 try:
                     self.stream_in.stop_stream()
                     self.stream_in.close()
-                except: pass
+                except:
+                    pass
             if self.audio_in:
-                try: self.audio_in.terminate()
-                except: pass
+                try:
+                    self.audio_in.terminate()
+                except:
+                    pass
             
             if self.username in self.participants:
                 self.participants[self.username]['audio'] = False
             
-            self.send_tcp({'type': 'status_update', 'audio': False})
+            message = json.dumps({'type': 'status_update', 'audio': False})
+            self.tcp_socket.send(message.encode('utf-8'))
     
     def toggle_screen_share(self):
         if not self.screen_share_enabled:
@@ -1136,14 +1223,20 @@ class ConferenceClient(QMainWindow):
                 QPushButton {
                     background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                         stop:0 #eb3349, stop:1 #f45c43);
-                    color: white; border: none; border-radius: 10px;
-                    padding: 12px; font-weight: bold; font-size: 11px;
+                    color: white;
+                    border: none;
+                    border-radius: 10px;
+                    padding: 12px;
+                    font-weight: bold;
+                    font-size: 11px;
                 }
                 QPushButton:hover {
                     background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                         stop:0 #f45c43, stop:1 #eb3349);
                 }
-                QPushButton:pressed { background: #d32f2f; }
+                QPushButton:pressed {
+                    background: #d32f2f;
+                }
             """)
             
             self.screen_share_active = True
@@ -1151,7 +1244,6 @@ class ConferenceClient(QMainWindow):
             self.current_page = 0
             self.display_screen_share()
             
-            # Send control message as JSON
             message = json.dumps({'type': 'screen_share', 'action': 'start', 'username': self.username})
             self.udp_socket.sendto(message.encode('utf-8'), (self.server_host, self.udp_port))
             
@@ -1165,17 +1257,22 @@ class ConferenceClient(QMainWindow):
                 QPushButton {
                     background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                         stop:0 #f2994a, stop:1 #f2c94c);
-                    color: white; border: none; border-radius: 10px;
-                    padding: 12px; font-weight: bold; font-size: 11px;
+                    color: white;
+                    border: none;
+                    border-radius: 10px;
+                    padding: 12px;
+                    font-weight: bold;
+                    font-size: 11px;
                 }
                 QPushButton:hover {
                     background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                         stop:0 #f2c94c, stop:1 #f2994a);
                 }
-                QPushButton:pressed { background: #d6843f; }
+                QPushButton:pressed {
+                    background: #d6843f;
+                }
             """)
             
-            # Send control message as JSON
             message = json.dumps({'type': 'screen_share', 'action': 'stop', 'username': self.username})
             self.udp_socket.sendto(message.encode('utf-8'), (self.server_host, self.udp_port))
             
@@ -1185,146 +1282,274 @@ class ConferenceClient(QMainWindow):
             self.current_page = 0
             self.hide_screen_share()
     
-    # --- Media Senders (Updated to Binary) ---
-
     def send_video(self):
-        username_bytes = self.username.encode('utf-8')
-        username_len = len(username_bytes)
-        if username_len > 255: # Sanity check
-            print("Username too long for packet header")
-            self.toggle_video()
-            return
-            
-        # Pre-pack header info
-        # Packet: [TYPE=1] [USERNAME_LEN] [USERNAME] [PAYLOAD]
-        header_prefix = struct.pack('!BB', 1, username_len) + username_bytes
-
         while self.video_enabled and self.running:
             try:
                 ret, frame = self.cap.read()
-                if not ret or frame is None:
+                if not ret or frame is None or frame.size == 0:
                     time.sleep(0.1)
                     continue
                 
-                frame_resized = cv2.resize(frame, (320, 240))
-                self.participants[self.username]['frame'] = frame_resized
+                frame = cv2.resize(frame, (320, 240))
+                self.participants[self.username]['frame'] = frame
                 
-                _, buffer = cv2.imencode('.jpg', frame_resized, [cv2.IMWRITE_JPEG_QUALITY, 50])
-                frame_data = buffer.tobytes()
+                _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 50])
+                frame_data = base64.b64encode(buffer).decode('utf-8')
                 
-                packet = header_prefix + frame_data
+                message = json.dumps({
+                    'type': 'video_frame',
+                    'username': self.username,
+                    'frame': frame_data
+                })
                 
-                self.udp_socket.sendto(packet, (self.server_host, self.udp_port))
-                self.video_frame_signal.emit(self.username, frame_resized)
+                self.udp_socket.sendto(message.encode('utf-8'), (self.server_host, self.udp_port))
+                self.video_frame_signal.emit(self.username, frame)
                 
-                time.sleep(0.033) # ~30 FPS
+                time.sleep(0.033)
             except Exception as e:
-                print(f"Send video error: {e}")
                 time.sleep(0.1)
+                continue
     
     def send_audio(self):
-        username_bytes = self.username.encode('utf-8')
-        username_len = len(username_bytes)
-        if username_len > 255:
-            print("Username too long for packet header")
-            self.toggle_audio()
-            return
-
-        # Packet: [TYPE=2] [USERNAME_LEN] [USERNAME] [PAYLOAD]
-        header_prefix = struct.pack('!BB', 2, username_len) + username_bytes
-
         while self.audio_enabled and self.running:
             try:
                 data = self.stream_in.read(2048, exception_on_overflow=False)
-                packet = header_prefix + data
-                self.udp_socket.sendto(packet, (self.server_host, self.udp_port))
+                audio_data = base64.b64encode(data).decode('utf-8')
+                
+                message = json.dumps({
+                    'type': 'audio_frame',
+                    'username': self.username,
+                    'audio': audio_data
+                })
+                
+                self.udp_socket.sendto(message.encode('utf-8'), (self.server_host, self.udp_port))
+                time.sleep(0.05)
             except Exception as e:
+                # On errors during capture or send, stop audio and clean up
                 print(f"Audio capture/send error: {e}")
-                # Post a function call to the main thread to safely stop audio
-                QTimer.singleShot(0, self.toggle_audio)
+                self.audio_enabled = False
+                try:
+                    if self.stream_in:
+                        self.stream_in.stop_stream()
+                        self.stream_in.close()
+                        self.stream_in = None
+                except:
+                    pass
+                try:
+                    if self.audio_in:
+                        self.audio_in.terminate()
+                        self.audio_in = None
+                except:
+                    pass
                 break
     
     def send_screen_share(self):
-        username_bytes = self.username.encode('utf-8')
-        username_len = len(username_bytes)
-        if username_len > 255:
-            print("Username too long for packet header")
-            self.toggle_screen_share()
-            return
-            
-        # Packet: [TYPE=3] [USERNAME_LEN] [USERNAME] [PAYLOAD]
-        header_prefix = struct.pack('!BB', 3, username_len) + username_bytes
-
         try:
             import platform
             system = platform.system()
             
+            print(f"[{self.username}] Starting screen share on {system}")
+            
             if system == "Linux":
-                app = QApplication.instance() or QApplication(sys.argv)
-                screen = app.primaryScreen()
-                
-                while self.screen_share_enabled and self.running:
-                    try:
-                        pixmap = screen.grabWindow(0)
-                        qimage = pixmap.toImage()
-                        width, height = qimage.width(), qimage.height()
-                        
-                        ptr = qimage.bits()
-                        ptr.setsize(qimage.byteCount())
-                        arr = np.array(ptr).reshape(height, width, 4)
-                        
-                        frame = cv2.cvtColor(arr, cv2.COLOR_RGBA2BGR)
-                        frame_resized = cv2.resize(frame, (800, 450))
-                        
-                        self.shared_screen_frame = frame_resized.copy()
-                        if self.current_page == 0:
-                            self.screen_share_frame_signal.emit(self.username, frame_resized.copy())
-                        
-                        _, buffer = cv2.imencode('.jpg', frame_resized, [cv2.IMWRITE_JPEG_QUALITY, 30])
-                        frame_data = buffer.tobytes()
-                        
-                        packet = header_prefix + frame_data
-                        if len(packet) < 65500: # Avoid oversized UDP packets
-                            self.udp_socket.sendto(packet, (self.server_host, self.udp_port))
-                        
-                        time.sleep(0.1) # ~10 FPS for screen share
-                    except Exception as e:
-                        print(f"Linux screen error: {e}")
-                        break
+                try:
+                    os.environ['QT_QPA_PLATFORM'] = 'xcb'
+                    
+                    app = QApplication.instance()
+                    if app is None:
+                        print("[ERROR] No QApplication instance!")
+                        return
+                    
+                    screen = app.primaryScreen()
+                    if screen is None:
+                        print("[ERROR] No primary screen!")
+                        return
+                    
+                    frame_count = 0
+                    skip_count = 0
+                    
+                    while self.screen_share_enabled and self.running:
+                        try:
+                            pixmap = screen.grabWindow(0)
+                            
+                            if pixmap.isNull():
+                                print("[WARN] Null pixmap captured")
+                                time.sleep(0.2)
+                                continue
+                            
+                            qimage = pixmap.toImage()
+                            qimage = qimage.convertToFormat(QImage.Format.Format_RGB888)
+                            
+                            width = qimage.width()
+                            height = qimage.height()
+                            
+                            if width == 0 or height == 0:
+                                print(f"[WARN] Invalid dimensions: {width}x{height}")
+                                time.sleep(0.2)
+                                continue
+                            
+                            ptr = qimage.constBits()
+                            ptr.setsize(qimage.sizeInBytes())
+                            arr = np.frombuffer(ptr, dtype=np.uint8).copy()
+                            arr = arr.reshape((height, width, 3))
+                            
+                            frame = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
+                            frame = cv2.resize(frame, (640, 360))
+                            
+                            display_frame = frame.copy()
+                            self.shared_screen_frame = display_frame
+                            
+                            if self.current_page == 0:
+                                self.screen_share_frame_signal.emit(display_frame)
+                            
+                            encode_params = [
+                                cv2.IMWRITE_JPEG_QUALITY, 25,
+                                cv2.IMWRITE_JPEG_OPTIMIZE, 1,
+                            ]
+                            _, buffer = cv2.imencode('.jpg', frame, encode_params)
+                            frame_data = base64.b64encode(buffer).decode('utf-8')
+                            
+                            base64_size = len(frame_data)
+                            
+                            if base64_size > 50000:
+                                skip_count += 1
+                                if skip_count % 10 == 0:
+                                    print(f"[WARN] Skipped {skip_count} frames (too large: {base64_size})")
+                                time.sleep(0.15)
+                                continue
+                            
+                            message = json.dumps({
+                                'type': 'screen_share',
+                                'action': 'frame',
+                                'username': self.username,
+                                'frame': frame_data
+                            })
+                            
+                            msg_size = len(message.encode('utf-8'))
+                            
+                            if msg_size < 60000:
+                                try:
+                                    self.udp_socket.sendto(
+                                        message.encode('utf-8'), 
+                                        (self.server_host, self.udp_port)
+                                    )
+                                    frame_count += 1
+                                    
+                                    if frame_count % 50 == 0:
+                                        print(f"[INFO] Sent {frame_count} frames, avg size: {msg_size} bytes")
+                                        
+                                except socket.error as e:
+                                    print(f"[ERROR] UDP send failed: {e}")
+                            else:
+                                skip_count += 1
+                                print(f"[WARN] Frame too large: {msg_size} bytes (base64: {base64_size})")
+                            
+                            time.sleep(0.15)
+                            
+                        except Exception as e:
+                            print(f"[ERROR] Linux screen capture error: {e}")
+                            import traceback
+                            traceback.print_exc()
+                            time.sleep(0.5)
+                            continue
+                    
+                    print(f"[INFO] Screen share stopped. Sent {frame_count} frames, skipped {skip_count}")
+                            
+                except Exception as e:
+                    print(f"[ERROR] Linux screen share init failed: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    QMessageBox.critical(self, "Error", f"Screen capture failed:\n{e}")
+                    self.screen_share_enabled = False
+                    return
+                    
             else:
-                # Windows/Mac with mss
+                print(f"[{self.username}] Using mss for screen capture")
+                
                 with mss() as sct:
-                    monitor = sct.monitors[1]
+                    try:
+                        monitor = sct.monitors[1]
+                    except:
+                        monitor = sct.monitors[0]
+                    
+                    frame_count = 0
+                    skip_count = 0
+                    
+                    print(f"[INFO] Capturing monitor: {monitor}")
+                    
                     while self.screen_share_enabled and self.running:
                         try:
                             screenshot = sct.grab(monitor)
                             frame = np.array(screenshot)
-                            frame_bgr = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
-                            frame_resized = cv2.resize(frame_bgr, (800, 600))
+                            frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
+                            frame = cv2.resize(frame, (640, 360))
                             
-                            self.shared_screen_frame = frame_resized.copy()
+                            self.shared_screen_frame = frame.copy()
                             if self.current_page == 0:
-                                self.screen_share_frame_signal.emit(self.username, frame_resized.copy())
+                                self.screen_share_frame_signal.emit(frame.copy())
                             
-                            _, buffer = cv2.imencode('.jpg', frame_resized, [cv2.IMWRITE_JPEG_QUALITY, 25])
-                            frame_data = buffer.tobytes()
+                            encode_params = [
+                                cv2.IMWRITE_JPEG_QUALITY, 25,
+                                cv2.IMWRITE_JPEG_OPTIMIZE, 1,
+                            ]
+                            _, buffer = cv2.imencode('.jpg', frame, encode_params)
+                            frame_data = base64.b64encode(buffer).decode('utf-8')
                             
-                            packet = header_prefix + frame_data
-                            if len(packet) < 65500: # Avoid oversized UDP packets
-                                self.udp_socket.sendto(packet, (self.server_host, self.udp_port))
+                            base64_size = len(frame_data)
                             
-                            time.sleep(0.1)
+                            if base64_size > 50000:
+                                skip_count += 1
+                                if skip_count % 10 == 0:
+                                    print(f"[WARN] Skipped {skip_count} frames (size: {base64_size})")
+                                time.sleep(0.15)
+                                continue
+                            
+                            message = json.dumps({
+                                'type': 'screen_share',
+                                'action': 'frame',
+                                'username': self.username,
+                                'frame': frame_data
+                            })
+                            
+                            msg_size = len(message.encode('utf-8'))
+                            
+                            if msg_size < 60000:
+                                try:
+                                    self.udp_socket.sendto(
+                                        message.encode('utf-8'),
+                                        (self.server_host, self.udp_port)
+                                    )
+                                    frame_count += 1
+                                    
+                                    if frame_count % 50 == 0:
+                                        print(f"[INFO] Sent {frame_count} frames")
+                                        
+                                except socket.error as e:
+                                    print(f"[ERROR] UDP send failed: {e}")
+                            else:
+                                skip_count += 1
+                                print(f"[WARN] Frame too large: {msg_size} bytes")
+                            
+                            time.sleep(0.15)
+                            
                         except Exception as e:
-                            print(f"Screen error: {e}")
-                            break
+                            print(f"[ERROR] Screen share error: {e}")
+                            time.sleep(0.5)
+                            continue
+                    
+                    print(f"[INFO] Screen share stopped. Sent {frame_count} frames, skipped {skip_count}")
+                        
         except Exception as e:
-            QMessageBox.critical(self, "Error", f"Screen share failed:\n{e}")
+            print(f"[FATAL] Screen share failed: {e}")
+            import traceback
+            traceback.print_exc()
+            
+            def show_error():
+                QMessageBox.critical(self, "Error", f"Screen share failed:\n{e}")
+                
+            QTimer.singleShot(0, show_error)
             self.screen_share_enabled = False
     
-    # --- Chat and File Transfer (Updated) ---
-    
     def open_chat(self):
-        # (This function is unchanged from your original code, but uses send_tcp)
         chat_dialog = QDialog(self)
         chat_dialog.setWindowTitle("💬 Chat")
         chat_dialog.setGeometry(200, 200, 500, 600)
@@ -1415,16 +1640,38 @@ class ConferenceClient(QMainWindow):
                         break
                 
                 if recipient:
-                    self.send_tcp({
+                    message = json.dumps({
                         'type': 'chat',
                         'recipient': recipient,
                         'message': msg
                     })
-                    message_entry.clear()
+                    try:
+                        self.tcp_socket.send(message.encode('utf-8'))
+                        message_entry.clear()
+                    except Exception as e:
+                        QMessageBox.critical(self, "Error", str(e))
         
         send_btn = QPushButton("📤 Send")
         send_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        send_btn.setStyleSheet(self.prev_btn.styleSheet()) # Reuse style
+        send_btn.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #667eea, stop:1 #764ba2);
+                color: white;
+                border: none;
+                border-radius: 8px;
+                padding: 10px 20px;
+                font-weight: bold;
+                font-size: 11px;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #764ba2, stop:1 #667eea);
+            }
+            QPushButton:pressed {
+                background: #5a4b8a;
+            }
+        """)
         send_btn.clicked.connect(send_chat)
         message_layout.addWidget(send_btn)
         
@@ -1436,7 +1683,6 @@ class ConferenceClient(QMainWindow):
         chat_dialog.exec()
     
     def handle_chat_message(self, message):
-        # (This function is unchanged from your original code)
         from_user = message.get('from', 'Unknown')
         msg_text = message.get('message', '')
         recipient = message.get('recipient', 'everyone')
@@ -1459,22 +1705,26 @@ class ConferenceClient(QMainWindow):
                 pass
     
     def open_file_transfer(self):
-        """Sends a file *offer* instead of the whole file."""
-        filepath, _ = QFileDialog.getOpenFileName(self, "Select file to send")
+        filepath, _ = QFileDialog.getOpenFileName(self, "Select file")
         if not filepath:
             return
         
         try:
-            filename = os.path.basename(filepath)
-            filesize = os.path.getsize(filepath)
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"Could not read file: {e}")
-            return
-            
+            import os
+            if os.path.getsize(filepath) > 10 * 1024 * 1024:
+                QMessageBox.warning(self, "Warning", "File too large! Max 10MB")
+                return
+        except:
+            pass
+        
         file_dialog = QDialog(self)
         file_dialog.setWindowTitle("Send File")
+        file_dialog.setGeometry(300, 300, 400, 250)
+        
         layout = QVBoxLayout(file_dialog)
-        layout.addWidget(QLabel(f"File: {filename} ({filesize // 1024} KB)"))
+        
+        filename = os.path.basename(filepath)
+        layout.addWidget(QLabel(f"File: {filename}"))
         layout.addWidget(QLabel("Send to:"))
         
         button_group = QButtonGroup(file_dialog)
@@ -1484,6 +1734,7 @@ class ConferenceClient(QMainWindow):
         layout.addWidget(everyone_radio)
         
         recipient_buttons = {'everyone': everyone_radio}
+        
         for username in self.participants.keys():
             if username != self.username:
                 radio = QRadioButton(username)
@@ -1491,169 +1742,98 @@ class ConferenceClient(QMainWindow):
                 layout.addWidget(radio)
                 recipient_buttons[username] = radio
         
-        def send_offer():
-            recipient = None
-            for name, radio in recipient_buttons.items():
-                if radio.isChecked():
-                    recipient = name
-                    break
-            
-            if recipient:
-                # Store for when we get 'file_accept'
-                self.pending_transfers[filename] = filepath
+        def send_file():
+            try:
+                with open(filepath, 'rb') as f:
+                    file_data = f.read()
                 
-                # Send the OFFER
-                self.send_tcp({
-                    'type': 'file_offer',
+                recipient = None
+                for name, radio in recipient_buttons.items():
+                    if radio.isChecked():
+                        recipient = name
+                        break
+                
+                message = json.dumps({
+                    'type': 'file_transfer',
                     'recipient': recipient,
                     'filename': filename,
-                    'size': filesize
+                    'data': base64.b64encode(file_data).decode('utf-8')
                 })
-                QMessageBox.information(self, "File Transfer", "File offer has been sent.")
+                
+                self.tcp_socket.send(message.encode('utf-8'))
+                QMessageBox.information(self, "Success", "File sent!")
                 file_dialog.accept()
+            except Exception as e:
+                QMessageBox.critical(self, "Error", str(e))
         
-        send_btn = QPushButton("Send Offer")
-        send_btn.clicked.connect(send_offer)
-        layout.addWidget(send_btn)
+        button_layout = QHBoxLayout()
+        send_btn = QPushButton("Send")
+        send_btn.clicked.connect(send_file)
+        button_layout.addWidget(send_btn)
+        
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(file_dialog.reject)
+        button_layout.addWidget(cancel_btn)
+        
+        layout.addLayout(button_layout)
         file_dialog.exec()
-
-    @pyqtSlot(dict)
-    def handle_file_offer(self, message):
-        """Handles an incoming file offer."""
+    
+    def handle_file_transfer(self, message):
         from_user = message.get('from', 'Unknown')
         filename = message.get('filename', 'file')
-        filesize = message.get('size', 0)
         
-        reply = QMessageBox.question(self, "File Transfer",
-            f"Accept file '{filename}' ({filesize // 1024} KB) from {from_user}?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-            
-        if reply == QMessageBox.StandardButton.Yes:
-            save_path, _ = QFileDialog.getSaveFileName(self, "Save file", filename)
-            if save_path:
-                try:
-                    f = open(save_path, 'wb')
-                    self.incoming_files[filename] = f
-                    
-                    self.send_tcp({
-                        'type': 'file_accept',
-                        'recipient': from_user, # Send back to original sender
-                        'filename': filename
-                    })
-                except Exception as e:
-                    QMessageBox.critical(self, "Error", f"Could not open file for writing: {e}")
-            else:
-                # User cancelled save dialog, implicitly reject
-                pass
-    
-    @pyqtSlot(dict)
-    def handle_file_accept(self, message):
-        """Called when a recipient accepts our file offer. Starts the upload thread."""
-        filename = message.get('filename')
-        recipient = message.get('from') # The user who accepted
-        
-        filepath = self.pending_transfers.get(filename)
-        
-        if filepath and recipient:
-            print(f"User {recipient} accepted file {filename}. Starting upload thread...")
-            # Start the transfer in a new thread to avoid blocking the GUI
-            transfer_thread = threading.Thread(
-                target=self.stream_file_chunks,
-                args=(filepath, recipient, filename)
-            )
-            transfer_thread.daemon = True
-            transfer_thread.start()
-        else:
-            print(f"Could not find pending transfer for {filename}")
-
-    def stream_file_chunks(self, filepath, recipient, filename):
-        """Reads file in chunks and sends them. Runs in a thread."""
         try:
-            with open(filepath, 'rb') as f:
-                while True:
-                    chunk = f.read(32768) # 32KB chunks
-                    if not chunk:
-                        break # End of file
-                    
-                    self.send_tcp({
-                        'type': 'file_chunk',
-                        'recipient': recipient,
-                        'filename': filename,
-                        'data': base64.b64encode(chunk).decode('utf-8')
-                    })
-                    time.sleep(0.01) # Small sleep to yield
+            file_data = base64.b64decode(message['data'])
+            save_path, _ = QFileDialog.getSaveFileName(self, f"Save file from {from_user}", filename)
             
-            # Send end message
-            self.send_tcp({
-                'type': 'file_end',
-                'recipient': recipient,
-                'filename': filename
-            })
-            print(f"Finished sending {filename} to {recipient}")
-            
+            if save_path:
+                with open(save_path, 'wb') as f:
+                    f.write(file_data)
+                QMessageBox.information(self, "Success", f"File saved!")
         except Exception as e:
-            print(f"Error during file stream: {e}")
-        finally:
-            if filename in self.pending_transfers:
-                del self.pending_transfers[filename]
-
-    @pyqtSlot(dict)
-    def handle_file_chunk(self, message):
-        """Receives a file chunk and writes it to disk."""
-        filename = message.get('filename')
-        if filename in self.incoming_files:
-            try:
-                file_data = base64.b64decode(message['data'])
-                self.incoming_files[filename].write(file_data)
-            except Exception as e:
-                print(f"Error writing file chunk: {e}")
-                self.incoming_files[filename].close()
-                del self.incoming_files[filename]
-
-    @pyqtSlot(dict)
-    def handle_file_end(self, message):
-        """Finishes a file transfer."""
-        filename = message.get('filename')
-        if filename in self.incoming_files:
-            self.incoming_files[filename].close()
-            del self.incoming_files[filename]
-            QMessageBox.information(self, "File Transfer", f"File '{filename}' received successfully!")
-            
+            QMessageBox.critical(self, "Error", str(e))
+    
     def closeEvent(self, event):
-        # (This function is unchanged from your original code)
         self.running = False
         
-        if self.cap: self.cap.release()
-        
+        if self.cap:
+            self.cap.release()
         if self.stream_in:
             try:
                 self.stream_in.stop_stream()
                 self.stream_in.close()
-            except: pass
+            except:
+                pass
         if self.audio_in:
-            try: self.audio_in.terminate()
-            except: pass
-            
+            try:
+                self.audio_in.terminate()
+            except:
+                pass
         if self.stream_out:
             try:
                 self.stream_out.stop_stream()
                 self.stream_out.close()
-            except: pass
+            except:
+                pass
         if self.audio_out:
-            try: self.audio_out.terminate()
-            except: pass
-            
+            try:
+                self.audio_out.terminate()
+            except:
+                pass
         if self.tcp_socket:
-            try: self.tcp_socket.close()
-            except: pass
+            try:
+                self.tcp_socket.close()
+            except:
+                pass
         if self.udp_socket:
-            try: self.udp_socket.close()
-            except: pass
+            try:
+                self.udp_socket.close()
+            except:
+                pass
         
         cv2.destroyAllWindows()
         event.accept()
 
-# --- Login Dialog (CSS warnings removed) ---
 class LoginDialog(QDialog):
     def __init__(self):
         super().__init__()
@@ -1688,34 +1868,13 @@ class LoginDialog(QDialog):
         title.setStyleSheet("""
             font-size: 22px;
             font-weight: bold;
-            color: white; /* Fallback color */
-            background: transparent; /* No background */
+            color: white;
+            background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                stop:0 #667eea, stop:1 #764ba2);
+            -webkit-background-clip: text;
             padding: 15px;
         """)
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
-        # --- THIS IS THE FIX ---
-        # We must set a fixed width for the label *before* creating the
-        # gradient, so the gradient knows how wide to be.
-        title.setFixedWidth(420) 
-        
-        # 1. Create a QLinearGradient
-        #    (x1, y1, x2, y2) -> We want a horizontal gradient across the label
-        gradient = QLinearGradient(0, 0, title.width(), 0)
-        gradient.setColorAt(0.0, QColor("#667eea")) # Start color
-        gradient.setColorAt(1.0, QColor("#764ba2")) # End color
-        
-        # 2. Get the label's palette
-        palette = title.palette()
-        
-        # 3. Set the 'WindowText' (foreground/text) color role 
-        #    to use our gradient brush
-        palette.setBrush(QPalette.ColorRole.WindowText, QBrush(gradient))
-        
-        # 4. Apply the new palette to the label
-        title.setPalette(palette)
-        # --- END OF FIX ---
-        
         layout.addWidget(title)
         
         layout.addWidget(QLabel("🌐 Server IP:"))
@@ -1758,7 +1917,6 @@ class LoginDialog(QDialog):
         layout.addWidget(connect_btn)
     
     def connect(self):
-        # (This function is unchanged from your original code)
         server = self.server_entry.text().strip()
         port = self.port_entry.text().strip()
         username = self.username_entry.text().strip()
@@ -1773,10 +1931,10 @@ class LoginDialog(QDialog):
             QMessageBox.warning(self, "Warning", "Fill all fields")
 
 def main():
-    # (This function is unchanged from your original code)
     app = QApplication(sys.argv)
     app.setStyle('Fusion')
     
+    # Set application-wide palette for dark mode
     palette = QPalette()
     palette.setColor(QPalette.ColorRole.Window, QColor(53, 53, 53))
     palette.setColor(QPalette.ColorRole.WindowText, Qt.GlobalColor.white)

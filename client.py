@@ -386,6 +386,30 @@ class ConferenceClient(QMainWindow):
             }
         """)
         
+    def _encode_frame_for_udp(self, frame_bgr, max_bytes=50000):
+        """Return (resized_bgr_frame, base64_jpeg) maximizing quality under UDP datagram size.
+        Tries higher resolutions and qualities first, backing off until size fits.
+        """
+        # Attempt a range of resolutions and JPEG qualities
+        candidate_resolutions = [
+            (1280, 720), (1120, 630), (960, 540), (854, 480), (800, 450), (720, 405), (640, 360)
+        ]
+        candidate_qualities = [85, 80, 75, 70, 65, 60, 55, 50]
+        for width, height in candidate_resolutions:
+            resized = cv2.resize(frame_bgr, (width, height))
+            for quality in candidate_qualities:
+                ok, buffer = cv2.imencode('.jpg', resized, [cv2.IMWRITE_JPEG_QUALITY, quality])
+                if not ok:
+                    continue
+                b64 = base64.b64encode(buffer).decode('utf-8')
+                if len(b64) <= max_bytes:
+                    return resized, b64
+        # Fallback
+        fallback = cv2.resize(frame_bgr, (640, 360))
+        ok, buffer = cv2.imencode('.jpg', fallback, [cv2.IMWRITE_JPEG_QUALITY, 50])
+        b64 = base64.b64encode(buffer).decode('utf-8')
+        return fallback, b64
+
     def connect(self):
         try:
             self.tcp_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -470,6 +494,16 @@ class ConferenceClient(QMainWindow):
                             self.chat_message_signal.emit(message)
                         elif msg_type == 'file_transfer':
                             self.file_transfer_signal.emit(message)
+                        elif msg_type == 'screen_share':
+                            action = message.get('action')
+                            username = message.get('username')
+                            if action == 'start':
+                                if username != self.username:
+                                    self.screen_share_start_signal.emit(username)
+                            elif action == 'stop':
+                                self.screen_share_stop_signal.emit()
+                            elif action == 'frame':
+                                self.handle_screen_share_frame(message)
                             
                     except json.JSONDecodeError:
                         break
@@ -1249,23 +1283,16 @@ class ConferenceClient(QMainWindow):
                             screenshot = ImageGrab.grab()
                             frame = np.array(screenshot)
                             frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-                            frame = cv2.resize(frame, (640, 360))
-                            
+                            # Higher quality for TCP relay
+                            frame = cv2.resize(frame, (1280, 720))
                             display_frame = frame.copy()
                             self.shared_screen_frame = display_frame
-                            
+
                             if self.current_page == 0:
                                 self.screen_share_frame_signal.emit(display_frame)
-                            
-                            _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 35])
+
+                            _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
                             frame_data = base64.b64encode(buffer).decode('utf-8')
-                            
-                            base64_size = len(frame_data)
-                            
-                            if base64_size > 50000:
-                                print(f"[WARN] Frame too large: {base64_size}, skipping")
-                                time.sleep(0.1)
-                                continue
                             
                             message = json.dumps({
                                 'type': 'screen_share',
@@ -1320,21 +1347,15 @@ class ConferenceClient(QMainWindow):
                             screenshot = sct.grab(monitor)
                             frame = np.array(screenshot)
                             frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
-                            frame = cv2.resize(frame, (640, 360))
-                            
+                            # Higher quality for TCP relay
+                            frame = cv2.resize(frame, (1280, 720))
+
                             self.shared_screen_frame = frame.copy()
                             if self.current_page == 0:
                                 self.screen_share_frame_signal.emit(frame.copy())
-                            
-                            _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 35])
+
+                            _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
                             frame_data = base64.b64encode(buffer).decode('utf-8')
-                            
-                            base64_size = len(frame_data)
-                            
-                            if base64_size > 50000:
-                                print(f"[WARN] Frame too large: {base64_size}, skipping")
-                                time.sleep(0.1)
-                                continue
                             
                             message = json.dumps({
                                 'type': 'screen_share',

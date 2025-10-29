@@ -80,6 +80,16 @@ class ConferenceServer:
                         self.udp_socket.sendto(data, udp_addr)
                     except Exception as e:
                         print(f"Error sending screen share UDP to {username}: {e}")
+
+    def broadcast_screen_share_tcp(self, data, sender_username):
+        """Relay screen-share messages reliably to all clients over TCP."""
+        with self.lock:
+            for client_socket, info in list(self.clients.items()):
+                if info.get('username') != sender_username:
+                    try:
+                        client_socket.send(data)
+                    except Exception as e:
+                        print(f"Error sending screen share TCP to {info.get('username')}: {e}")
                 
     def handle_tcp_client(self, client_socket, address):
         username = None
@@ -179,11 +189,13 @@ class ConferenceServer:
         if action in ['start', 'stop']:
             print(f"Screen share {action} from {sender_username}")
             data = json.dumps(message).encode('utf-8')
-            self.broadcast_screen_share_udp(data, sender_username)
+            # Broadcast over TCP for higher reliability and larger frames
+            self.broadcast_screen_share_tcp(data, sender_username)
         
         elif action == 'frame':
             data = json.dumps(message).encode('utf-8')
-            self.broadcast_screen_share_udp(data, sender_username)
+            # Broadcast frames over TCP
+            self.broadcast_screen_share_tcp(data, sender_username)
             
     def send_participant_list(self, client_socket):
         participants = []

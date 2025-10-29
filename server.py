@@ -8,16 +8,14 @@ class ConferenceServer:
         self.tcp_port = tcp_port
         self.udp_port = udp_port
         
-        # TCP Socket for control messages
         self.tcp_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.tcp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         
-        # UDP Socket for media streaming
         self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         
-        self.clients = {}  # {tcp_socket: {'username': str, 'address': tuple, 'udp_address': tuple, 'video': bool, 'audio': bool}}
-        self.username_to_udp = {}  # {username: udp_address}
+        self.clients = {}
+        self.username_to_udp = {}
         self.running = True
         self.lock = threading.Lock()
         
@@ -29,12 +27,10 @@ class ConferenceServer:
         
         print(f"Server started on TCP port {self.tcp_port} and UDP port {self.udp_port}")
         
-        # Start UDP receiver thread
         udp_thread = threading.Thread(target=self.handle_udp)
         udp_thread.daemon = True
         udp_thread.start()
         
-        # Accept TCP connections
         while self.running:
             try:
                 client_socket, address = self.tcp_socket.accept()
@@ -47,32 +43,19 @@ class ConferenceServer:
                     print(f"Error accepting TCP connection: {e}")
     
     def handle_udp(self):
-        """Handle all UDP media packets"""
         while self.running:
             try:
-                data, addr = self.udp_socket.recvfrom(131072)  # Increased buffer
+                data, addr = self.udp_socket.recvfrom(131072)
                 message = json.loads(data.decode('utf-8'))
                 msg_type = message.get('type')
                 username = message.get('username')
                 
-                # Register UDP address for this user
                 if username:
                     with self.lock:
                         self.username_to_udp[username] = addr
                 
-                # Broadcast based on type
                 if msg_type in ['video_frame', 'audio_frame']:
-                    # Video and audio - don't send back to sender
                     self.broadcast_udp_exclude_sender(data, addr, username)
-                elif msg_type == 'screen_share':
-                    # Screen share - send to everyone including sender
-                    action = message.get('action')
-                    if action == 'frame':
-                        # For frames, exclude sender (they have their own copy)
-                        self.broadcast_udp_exclude_sender(data, addr, username)
-                    else:
-                        # For start/stop, send to everyone
-                        self.broadcast_udp_all(data, username)
                     
             except json.JSONDecodeError:
                 continue
@@ -81,7 +64,6 @@ class ConferenceServer:
                     print(f"UDP error: {e}")
     
     def broadcast_udp_exclude_sender(self, data, sender_addr, sender_username):
-        """Broadcast UDP packet to all clients except sender"""
         with self.lock:
             for username, udp_addr in list(self.username_to_udp.items()):
                 if username != sender_username:
@@ -90,21 +72,20 @@ class ConferenceServer:
                     except Exception as e:
                         print(f"Error sending UDP to {username}: {e}")
     
-    def broadcast_udp_all(self, data, sender_username):
-        """Broadcast UDP packet to all clients including sender"""
+    def broadcast_screen_share_udp(self, data, sender_username):
         with self.lock:
             for username, udp_addr in list(self.username_to_udp.items()):
-                try:
-                    self.udp_socket.sendto(data, udp_addr)
-                except Exception as e:
-                    print(f"Error sending UDP to {username}: {e}")
+                if username != sender_username:
+                    try:
+                        self.udp_socket.sendto(data, udp_addr)
+                    except Exception as e:
+                        print(f"Error sending screen share UDP to {username}: {e}")
                 
     def handle_tcp_client(self, client_socket, address):
         username = None
         try:
             client_socket.settimeout(60.0)
             
-            # Receive username and UDP info
             data = client_socket.recv(4096).decode('utf-8')
             msg = json.loads(data)
             username = msg['username']
@@ -119,7 +100,6 @@ class ConferenceServer:
             
             print(f"User {username} connected from {address}")
             
-            # Send UDP port info and current participants
             response = json.dumps({
                 'type': 'connection_info',
                 'udp_port': self.udp_port
@@ -131,7 +111,8 @@ class ConferenceServer:
             self.send_participant_list(client_socket)
             self.broadcast_participant_update()
             
-            # Handle TCP messages (chat, files, status)
+            buffer = ""
+            
             while self.running:
                 try:
                     data = client_socket.recv(65536)
@@ -139,24 +120,33 @@ class ConferenceServer:
                         print(f"Client {username} disconnected (no data)")
                         break
                     
-                    message = json.loads(data.decode('utf-8'))
-                    msg_type = message.get('type')
+                    buffer += data.decode('utf-8')
                     
-                    if msg_type == 'chat':
-                        self.route_chat(client_socket, message)
-                    elif msg_type == 'file_transfer':
-                        self.route_file(client_socket, message)
-                    elif msg_type == 'status_update':
-                        self.update_status(client_socket, message)
-                    elif msg_type == 'ping':
-                        # Respond to keep-alive ping
+                    while True:
                         try:
-                            client_socket.send(json.dumps({'type': 'pong'}).encode('utf-8'))
-                        except:
+                            message, idx = json.JSONDecoder().raw_decode(buffer)
+                            buffer = buffer[idx:].lstrip()
+                            
+                            msg_type = message.get('type')
+                            
+                            if msg_type == 'chat':
+                                self.route_chat(client_socket, message)
+                            elif msg_type == 'file_transfer':
+                                self.route_file(client_socket, message)
+                            elif msg_type == 'status_update':
+                                self.update_status(client_socket, message)
+                            elif msg_type == 'screen_share':
+                                self.handle_screen_share(client_socket, message)
+                            elif msg_type == 'ping':
+                                try:
+                                    client_socket.send(json.dumps({'type': 'pong'}).encode('utf-8'))
+                                except:
+                                    break
+                                    
+                        except json.JSONDecodeError:
                             break
                         
                 except socket.timeout:
-                    # Check if client is still alive
                     try:
                         client_socket.send(json.dumps({'type': 'ping'}).encode('utf-8'))
                     except:
@@ -169,9 +159,6 @@ class ConferenceServer:
                 except ConnectionAbortedError:
                     print(f"Client {username} connection aborted")
                     break
-                except json.JSONDecodeError as e:
-                    print(f"JSON error from {username}: {e}")
-                    continue
                 except Exception as e:
                     print(f"TCP error from {username}: {e}")
                     break
@@ -180,10 +167,23 @@ class ConferenceServer:
             print(f"Error with client {address}: {e}")
         finally:
             self.remove_client(client_socket, username)
-            
-            # Force update to all remaining clients
             time.sleep(0.2)
             self.broadcast_participant_update()
+            
+    def handle_screen_share(self, sender_socket, message):
+        with self.lock:
+            sender_username = self.clients.get(sender_socket, {}).get('username', 'Unknown')
+        
+        action = message.get('action')
+        
+        if action in ['start', 'stop']:
+            print(f"Screen share {action} from {sender_username}")
+            data = json.dumps(message).encode('utf-8')
+            self.broadcast_screen_share_udp(data, sender_username)
+        
+        elif action == 'frame':
+            data = json.dumps(message).encode('utf-8')
+            self.broadcast_screen_share_udp(data, sender_username)
             
     def send_participant_list(self, client_socket):
         participants = []
@@ -247,7 +247,6 @@ class ConferenceServer:
         data = json.dumps(response).encode('utf-8')
         
         if recipient == 'everyone':
-            # Broadcast to all clients
             with self.lock:
                 for client_socket in list(self.clients.keys()):
                     try:
@@ -256,7 +255,6 @@ class ConferenceServer:
                     except Exception as e:
                         print(f"Error sending chat: {e}")
         else:
-            # Send to specific recipient and sender (for confirmation)
             with self.lock:
                 for client_socket, info in self.clients.items():
                     if info['username'] == recipient or client_socket == sender_socket:
@@ -342,19 +340,16 @@ if __name__ == "__main__":
     print("Or type 'quit' and press Enter")
     print("="*50 + "\n")
     
-    # Start server in a separate thread
     server_thread = threading.Thread(target=server.start)
     server_thread.daemon = True
     server_thread.start()
     
     try:
         while True:
-            # Check for user input to quit
             try:
                 import sys
                 import select
                 if sys.platform == 'win32':
-                    # Windows: check for input with timeout
                     import msvcrt
                     if msvcrt.kbhit():
                         cmd = input().strip().lower()
@@ -362,7 +357,6 @@ if __name__ == "__main__":
                             print("\nShutting down server...")
                             break
                 else:
-                    # Linux/Mac: use select
                     if select.select([sys.stdin], [], [], 1)[0]:
                         cmd = input().strip().lower()
                         if cmd in ['quit', 'exit', 'q']:

@@ -413,10 +413,18 @@ class ConferenceClient(QMainWindow):
     def connect(self):
         try:
             self.tcp_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            try:
+                # Enable TCP keepalive to reduce idle disconnects
+                self.tcp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+            except Exception:
+                pass
             self.tcp_socket.connect((self.server_host, self.tcp_port))
             
             message = json.dumps({'username': self.username})
-            self.tcp_socket.send(message.encode('utf-8'))
+            try:
+                self.tcp_socket.send(message.encode('utf-8'))
+            except Exception:
+                pass
             
             data = self.tcp_socket.recv(4096).decode('utf-8')
             msg = json.loads(data)
@@ -494,6 +502,11 @@ class ConferenceClient(QMainWindow):
                             self.chat_message_signal.emit(message)
                         elif msg_type == 'file_transfer':
                             self.file_transfer_signal.emit(message)
+                        elif msg_type == 'ping':
+                            try:
+                                self.tcp_socket.send(json.dumps({'type': 'pong'}).encode('utf-8'))
+                            except Exception:
+                                pass
                         elif msg_type == 'screen_share':
                             action = message.get('action')
                             username = message.get('username')
@@ -984,7 +997,10 @@ class ConferenceClient(QMainWindow):
                     self.participants[self.username]['video'] = True
                 
                 message = json.dumps({'type': 'status_update', 'video': True})
-                self.tcp_socket.send(message.encode('utf-8'))
+                try:
+                    self.tcp_socket.send(message.encode('utf-8'))
+                except Exception:
+                    pass
                 
                 video_thread = threading.Thread(target=self.send_video)
                 video_thread.daemon = True
@@ -1027,7 +1043,10 @@ class ConferenceClient(QMainWindow):
                 self.participants[self.username]['frame'] = None
             
             message = json.dumps({'type': 'status_update', 'video': False})
-            self.tcp_socket.send(message.encode('utf-8'))
+            try:
+                self.tcp_socket.send(message.encode('utf-8'))
+            except Exception:
+                pass
             
             if self.username in self.video_labels:
                 video_label = self.video_labels[self.username]['video_label']
@@ -1095,7 +1114,10 @@ class ConferenceClient(QMainWindow):
                     self.participants[self.username]['audio'] = True
                 
                 message = json.dumps({'type': 'status_update', 'audio': True})
-                self.tcp_socket.send(message.encode('utf-8'))
+                try:
+                    self.tcp_socket.send(message.encode('utf-8'))
+                except Exception:
+                    pass
                 
                 audio_thread = threading.Thread(target=self.send_audio)
                 audio_thread.daemon = True
@@ -1135,7 +1157,10 @@ class ConferenceClient(QMainWindow):
                 self.participants[self.username]['audio'] = False
             
             message = json.dumps({'type': 'status_update', 'audio': False})
-            self.tcp_socket.send(message.encode('utf-8'))
+            try:
+                self.tcp_socket.send(message.encode('utf-8'))
+            except Exception:
+                pass
     
     def toggle_screen_share(self):
         if not self.screen_share_enabled:
@@ -1167,7 +1192,10 @@ class ConferenceClient(QMainWindow):
             self.display_screen_share()
             
             message = json.dumps({'type': 'screen_share', 'action': 'start', 'username': self.username})
-            self.tcp_socket.send(message.encode('utf-8'))
+            try:
+                self.tcp_socket.send(message.encode('utf-8'))
+            except Exception:
+                pass
             
             screen_thread = threading.Thread(target=self.send_screen_share)
             screen_thread.daemon = True
@@ -1196,7 +1224,10 @@ class ConferenceClient(QMainWindow):
             """)
             
             message = json.dumps({'type': 'screen_share', 'action': 'stop', 'username': self.username})
-            self.tcp_socket.send(message.encode('utf-8'))
+            try:
+                self.tcp_socket.send(message.encode('utf-8'))
+            except Exception:
+                pass
             
             self.screen_share_active = False
             self.screen_share_user = None

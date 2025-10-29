@@ -1699,7 +1699,10 @@ class LoginDialog(QDialog):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("🎥 Join Conference")
-        self.setFixedSize(450, 350)
+        # Open at an optimal medium size so all text fields are clearly visible
+        self.resize(700, 520)
+        self.setMinimumSize(500, 380)
+        self.setSizeGripEnabled(True)
         self.result_data = None
         self.setStyleSheet("""
             QDialog {

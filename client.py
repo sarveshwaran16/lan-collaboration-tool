@@ -829,38 +829,22 @@ class ConferenceClient(QMainWindow):
         self.screen_share_label = VideoLabel()
         self.screen_share_label.setText("Loading screen share...")
         self.screen_share_label.setStyleSheet("color: gray; font-size: 16px;")
+        # Lock the screen-share label to current video area size to avoid sliding/growing
+        area_size = self.video_frame.size()
+        if area_size.width() > 0 and area_size.height() > 0:
+            self.screen_share_label.setFixedSize(area_size)
+        self.screen_share_label.setScaledContents(True)
         screen_container_layout.addWidget(self.screen_share_label)
         
-        if self.screen_share_user in self.participants:
-            overlay_frame = QFrame(screen_container)
-            overlay_frame.setStyleSheet("background-color: rgba(0, 0, 0, 180); border: 2px solid #4CAF50; border-radius: 5px;")
-            overlay_frame.setFixedSize(200, 150)
-            overlay_frame.move(10, 10)
-            
-            overlay_layout = QVBoxLayout(overlay_frame)
-            overlay_layout.setContentsMargins(2, 2, 2, 2)
-            overlay_layout.setSpacing(0)
-            
-            self.presenter_overlay = VideoLabel()
-            self.presenter_overlay.setText(self.screen_share_user)
-            self.presenter_overlay.setStyleSheet("font-size: 12px; color: white;")
-            overlay_layout.addWidget(self.presenter_overlay)
-            
-            presenter_name = QLabel(self.screen_share_user)
-            presenter_name.setStyleSheet("color: white; font-size: 9px; font-weight: bold; background-color: #1a1a1a; padding: 2px;")
-            presenter_name.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            overlay_layout.addWidget(presenter_name)
-            
-            def position_overlay():
-                if screen_container.isVisible():
-                    x = screen_container.width() - overlay_frame.width() - 10
-                    y = screen_container.height() - overlay_frame.height() - 10
-                    overlay_frame.move(max(10, x), max(10, y))
-            
-            screen_container.resizeEvent = lambda event: position_overlay()
-            overlay_frame.raise_()
+        # Presenter overlay removed per UX request
         
         main_layout.addWidget(screen_container, stretch=1)
+        
+        # Lock containers to the same size as video area to keep layout static while sharing
+        area_size = self.video_frame.size()
+        if area_size.width() > 0 and area_size.height() > 0:
+            main_container.setFixedSize(area_size)
+            screen_container.setFixedSize(area_size)
         
         self.video_layout.addWidget(main_container, 0, 0)
         self.video_layout.setRowStretch(0, 1)
@@ -869,8 +853,7 @@ class ConferenceClient(QMainWindow):
         if self.shared_screen_frame is not None:
             self.update_screen_share_display(self.shared_screen_frame)
         
-        if self.screen_share_user in self.participants and self.participants[self.screen_share_user]['frame'] is not None:
-            self.update_presenter_overlay(self.participants[self.screen_share_user]['frame'])
+        # Presenter overlay removed - no overlay to update
         
         participant_list = list(self.participants.keys())
         total_pages = 1 + max(1, (len(participant_list) - 1) // self.participants_per_page + 1)
@@ -887,7 +870,10 @@ class ConferenceClient(QMainWindow):
             q_image = QImage(frame_rgb.data, width, height, bytes_per_line, QImage.Format.Format_RGB888)
             
             pixmap = QPixmap.fromImage(q_image)
-            scaled_pixmap = pixmap.scaled(self.screen_share_label.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+            target_size = self.video_frame.size()
+            if target_size.width() <= 0 or target_size.height() <= 0:
+                target_size = self.screen_share_label.size()
+            scaled_pixmap = pixmap.scaled(target_size, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
             self.screen_share_label.setPixmap(scaled_pixmap)
             self.screen_share_label.setText("")
         except Exception as e:

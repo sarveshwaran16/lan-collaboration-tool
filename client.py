@@ -82,6 +82,35 @@ class ConferenceClient(QMainWindow):
         
         self.setup_gui()
         
+    def _open_camera_windows(self):
+        """Try multiple backends and indices; always release failed handles so the camera isn't left locked."""
+        preferred_backends = [cv2.CAP_DSHOW, cv2.CAP_MSMF, 0]  # 0 = default
+        for backend in preferred_backends:
+            for index in range(0, 4):
+                try:
+                    cap = cv2.VideoCapture(index, backend) if backend != 0 else cv2.VideoCapture(index)
+                    if not cap.isOpened():
+                        try:
+                            cap.release()
+                        except:
+                            pass
+                        continue
+                    ret, frame = cap.read()
+                    if ret and frame is not None and frame.size > 0:
+                        self.cap = cap
+                        return True
+                    try:
+                        cap.release()
+                    except:
+                        pass
+                except Exception:
+                    try:
+                        cap.release()
+                    except:
+                        pass
+                    continue
+        return False
+
     def setup_gui(self):
         self.setWindowTitle(f"🎥 Conference - {self.username}")
         self.setGeometry(100, 100, 1400, 800)
@@ -943,9 +972,17 @@ class ConferenceClient(QMainWindow):
                     if not self.cap.isOpened():
                         self.cap = cv2.VideoCapture(0)
                 else:
-                    self.cap = cv2.VideoCapture(0)
-                    if not self.cap.isOpened():
-                        self.cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+                    # Robust open on Windows: try several backends/indices and ensure we don't leave the camera locked
+                    if self.cap:
+                        try:
+                            self.cap.release()
+                        except:
+                            pass
+                        self.cap = None
+                    ok = self._open_camera_windows()
+                    if not ok:
+                        QMessageBox.critical(self, "Error", "Could not open camera (in use or not found)")
+                        return
                 
                 if not self.cap.isOpened():
                     QMessageBox.critical(self, "Error", "Could not open camera")

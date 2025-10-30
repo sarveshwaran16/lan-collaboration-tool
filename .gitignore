@@ -1,3 +1,23 @@
 .venv/
 README.md
 DESIGN_GUIDE.md
+# Ignore build artifacts and executables
+build/
+dist/
+
+# PyInstaller spec files (auto-generated, not needed)
+*.spec
+
+# Python cache and compiled files
+__pycache__/
+*.pyc
+
+# Executables (shouldn't be versioned)
+*.exe
+
+# Log and temp files
+*.log
+
+# OS generated files (optional, for completeness)
+.DS_Store
+Thumbs.db

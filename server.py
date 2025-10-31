@@ -19,6 +19,9 @@ class ConferenceServer:
         self.running = True
         self.lock = threading.Lock()
         
+        # File storage: {filename: {'data': bytes, 'size': int, 'uploaded_by': str}}
+        self.files = {}
+        
     def start(self):
         self.tcp_socket.bind(('0.0.0.0', self.tcp_port))
         self.tcp_socket.listen(10)
@@ -143,6 +146,10 @@ class ConferenceServer:
                                 self.route_chat(client_socket, message)
                             elif msg_type == 'file_transfer':
                                 self.route_file(client_socket, message)
+                            elif msg_type == 'file_upload':
+                                self.handle_file_upload(client_socket, message)
+                            elif msg_type == 'file_download':
+                                self.handle_file_download(client_socket, message)
                             elif msg_type == 'status_update':
                                 self.update_status(client_socket, message)
                             elif msg_type == 'screen_share':
@@ -300,7 +307,82 @@ class ConferenceServer:
                             client_socket.send(data)
                         except:
                             pass
-                        
+    
+    def handle_file_upload(self, sender_socket, message):
+        import base64
+        with self.lock:
+            sender_username = self.clients.get(sender_socket, {}).get('username', 'Unknown')
+        
+        filename = message.get('filename')
+        file_size = message.get('size', 0)
+        recipient = message.get('recipient', 'everyone')
+        
+        try:
+            file_data = base64.b64decode(message['data'])
+            
+            # Store file
+            with self.lock:
+                self.files[filename] = {
+                    'data': file_data,
+                    'size': file_size,
+                    'uploaded_by': sender_username
+                }
+            
+            print(f"File {filename} uploaded by {sender_username} for {recipient} ({file_size} bytes)")
+            
+            # Notify recipients
+            notification = json.dumps({
+                'type': 'file_available',
+                'from': sender_username,
+                'filename': filename,
+                'size': file_size
+            }).encode('utf-8')
+            
+            with self.lock:
+                if recipient == 'everyone':
+                    # Notify all except sender
+                    for client_socket, info in self.clients.items():
+                        if info['username'] != sender_username:
+                            try:
+                                client_socket.send(notification)
+                            except:
+                                pass
+                else:
+                    # Notify only the specified recipient
+                    for client_socket, info in self.clients.items():
+                        if info['username'] == recipient:
+                            try:
+                                client_socket.send(notification)
+                            except:
+                                pass
+        except Exception as e:
+            print(f"Error handling file upload: {e}")
+    
+    def handle_file_download(self, requester_socket, message):
+        import base64
+        filename = message.get('filename')
+        
+        with self.lock:
+            if filename in self.files:
+                file_info = self.files[filename]
+                file_data = file_info['data']
+                
+                # Send file to requester
+                response = json.dumps({
+                    'type': 'file_transfer',
+                    'from': 'Server',
+                    'filename': filename,
+                    'data': base64.b64encode(file_data).decode('utf-8')
+                }).encode('utf-8')
+                
+                try:
+                    requester_socket.send(response)
+                    print(f"File {filename} downloaded by {self.clients[requester_socket]['username']}")
+                except Exception as e:
+                    print(f"Error sending file: {e}")
+            else:
+                print(f"File {filename} not found")
+    
     def update_status(self, client_socket, message):
         with self.lock:
             if client_socket in self.clients:

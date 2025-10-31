@@ -36,6 +36,7 @@ class ConferenceClient(QMainWindow):
     screen_share_frame_signal = pyqtSignal(object)
     chat_message_signal = pyqtSignal(dict)
     file_transfer_signal = pyqtSignal(dict)
+    file_available_signal = pyqtSignal(dict)
     
     def __init__(self, server_host, server_port, username):
         super().__init__()
@@ -61,6 +62,7 @@ class ConferenceClient(QMainWindow):
         self.stream_out = None
         
         self.participants = {}
+        self.previous_participants = set()
         self.current_page = 0
         self.participants_per_page = 4
         self.chat_windows = []
@@ -79,6 +81,7 @@ class ConferenceClient(QMainWindow):
         self.screen_share_frame_signal.connect(self.update_screen_share_display)
         self.chat_message_signal.connect(self.handle_chat_message)
         self.file_transfer_signal.connect(self.handle_file_transfer)
+        self.file_available_signal.connect(self.handle_file_available)
         
         self.setup_gui()
         
@@ -361,14 +364,16 @@ class ConferenceClient(QMainWindow):
         """)
         right_layout = QVBoxLayout(right_widget)
         right_layout.setContentsMargins(10, 10, 10, 10)
+        right_layout.setSpacing(10)
         
+        # Participants section
         participants_label = QLabel("👥 Participants")
         participants_label.setStyleSheet("""
-            font-size: 16px;
+            font-size: 14px;
             font-weight: bold;
             color: white;
             background: transparent;
-            padding: 10px;
+            padding: 5px;
         """)
         participants_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         right_layout.addWidget(participants_label)
@@ -380,11 +385,11 @@ class ConferenceClient(QMainWindow):
                 color: white;
                 border: 2px solid rgba(255, 255, 255, 0.2);
                 border-radius: 8px;
-                font-size: 12px;
+                font-size: 11px;
                 padding: 5px;
             }
             QListWidget::item {
-                padding: 8px;
+                padding: 6px;
                 border-radius: 5px;
                 margin: 2px;
             }
@@ -396,7 +401,34 @@ class ConferenceClient(QMainWindow):
                     stop:0 #667eea, stop:1 #764ba2);
             }
         """)
-        right_layout.addWidget(self.participant_list)
+        right_layout.addWidget(self.participant_list, stretch=1)
+        
+        # Activity log section
+        activity_label = QLabel("📋 Activity Log")
+        activity_label.setStyleSheet("""
+            font-size: 14px;
+            font-weight: bold;
+            color: white;
+            background: transparent;
+            padding: 5px;
+        """)
+        activity_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        right_layout.addWidget(activity_label)
+        
+        self.activity_log = QTextEdit()
+        self.activity_log.setReadOnly(True)
+        self.activity_log.setStyleSheet("""
+            QTextEdit {
+                background: rgba(255, 255, 255, 0.1);
+                color: #a0a0a0;
+                border: 2px solid rgba(255, 255, 255, 0.2);
+                border-radius: 8px;
+                font-size: 10px;
+                padding: 5px;
+            }
+        """)
+        self.activity_log.setMaximumHeight(200)
+        right_layout.addWidget(self.activity_log, stretch=1)
         
         main_layout.addWidget(right_widget, stretch=1)
         
@@ -531,6 +563,8 @@ class ConferenceClient(QMainWindow):
                             self.chat_message_signal.emit(message)
                         elif msg_type == 'file_transfer':
                             self.file_transfer_signal.emit(message)
+                        elif msg_type == 'file_available':
+                            self.file_available_signal.emit(message)
                         elif msg_type == 'ping':
                             try:
                                 self.tcp_socket.send(json.dumps({'type': 'pong'}).encode('utf-8'))
@@ -636,7 +670,27 @@ class ConferenceClient(QMainWindow):
         except Exception as e:
             pass
     
+    def log_activity(self, message):
+        """Add a message to the activity log"""
+        timestamp = time.strftime('%H:%M:%S')
+        formatted_msg = f"[{timestamp}] {message}\n"
+        self.activity_log.append(formatted_msg)
+    
     def update_participant_list(self, participants):
+        current_usernames = set(p['username'] for p in participants)
+        
+        # Detect joins
+        for username in current_usernames:
+            if username not in self.previous_participants and username != self.username:
+                self.log_activity(f"👤 {username} joined")
+        
+        # Detect leaves
+        for username in self.previous_participants:
+            if username not in current_usernames and username != self.username:
+                self.log_activity(f"👋 {username} left")
+        
+        self.previous_participants = current_usernames.copy()
+        
         for p in participants:
             username = p['username']
             if username not in self.participants:
@@ -657,7 +711,6 @@ class ConferenceClient(QMainWindow):
                     if username in self.video_labels:
                         self.clear_user_video(username)
         
-        current_usernames = [p['username'] for p in participants]
         for username in list(self.participants.keys()):
             if username not in current_usernames:
                 del self.participants[username]
@@ -936,13 +989,18 @@ class ConferenceClient(QMainWindow):
         self.screen_share_user = username
         self.current_page = 0
         self.shared_screen_frame = None
+        if username != self.username:
+            self.log_activity(f"🖥️ {username} started screen sharing")
         self.display_screen_share()
     
     def handle_screen_share_stop(self):
+        username = self.screen_share_user
         self.screen_share_active = False
         self.screen_share_user = None
         self.shared_screen_frame = None
         self.current_page = 0
+        if username and username != self.username:
+            self.log_activity(f"🖥️ {username} stopped screen sharing")
         self.hide_screen_share()
     
     def prev_page(self):
@@ -1616,14 +1674,22 @@ class ConferenceClient(QMainWindow):
             pass
         
         file_dialog = QDialog(self)
-        file_dialog.setWindowTitle("Send File")
-        file_dialog.setGeometry(300, 300, 400, 250)
+        file_dialog.setWindowTitle("Share File")
+        file_dialog.setGeometry(300, 300, 400, 300)
         
         layout = QVBoxLayout(file_dialog)
         
         filename = os.path.basename(filepath)
-        layout.addWidget(QLabel(f"File: {filename}"))
-        layout.addWidget(QLabel("Send to:"))
+        file_size = os.path.getsize(filepath)
+        size_mb = file_size / (1024 * 1024)
+        
+        file_info = QLabel(f"File: {filename} ({size_mb:.2f} MB)")
+        file_info.setStyleSheet("font-weight: bold; font-size: 12px;")
+        layout.addWidget(file_info)
+        
+        recipient_label = QLabel("Share with:")
+        recipient_label.setStyleSheet("font-weight: bold;")
+        layout.addWidget(recipient_label)
         
         button_group = QButtonGroup(file_dialog)
         everyone_radio = QRadioButton("Everyone")
@@ -1651,21 +1717,30 @@ class ConferenceClient(QMainWindow):
                         recipient = name
                         break
                 
+                # Always upload to server with recipient info
                 message = json.dumps({
-                    'type': 'file_transfer',
+                    'type': 'file_upload',
                     'recipient': recipient,
                     'filename': filename,
+                    'size': file_size,
                     'data': base64.b64encode(file_data).decode('utf-8')
                 })
                 
                 self.tcp_socket.send(message.encode('utf-8'))
-                QMessageBox.information(self, "Success", "File sent!")
+                
+                # Log activity
+                if recipient == 'everyone':
+                    self.log_activity(f"📁 Shared {filename} with everyone")
+                else:
+                    self.log_activity(f"📁 Shared {filename} with {recipient}")
+                
+                QMessageBox.information(self, "Success", f"File shared with {recipient}!")
                 file_dialog.accept()
             except Exception as e:
                 QMessageBox.critical(self, "Error", str(e))
         
         button_layout = QHBoxLayout()
-        send_btn = QPushButton("Send")
+        send_btn = QPushButton("Share")
         send_btn.clicked.connect(send_file)
         button_layout.addWidget(send_btn)
         
@@ -1680,16 +1755,56 @@ class ConferenceClient(QMainWindow):
         from_user = message.get('from', 'Unknown')
         filename = message.get('filename', 'file')
         
-        try:
-            file_data = base64.b64decode(message['data'])
-            save_path, _ = QFileDialog.getSaveFileName(self, f"Save file from {from_user}", filename)
-            
-            if save_path:
-                with open(save_path, 'wb') as f:
-                    f.write(file_data)
-                QMessageBox.information(self, "Success", f"File saved!")
-        except Exception as e:
-            QMessageBox.critical(self, "Error", str(e))
+        # Show accept/reject dialog first
+        reply = QMessageBox.question(
+            self, 
+            "📁 File Transfer", 
+            f"{from_user} wants to send you: {filename}\n\nDo you want to accept this file?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes
+        )
+        
+        if reply == QMessageBox.StandardButton.Yes:
+            try:
+                file_data = base64.b64decode(message['data'])
+                save_path, _ = QFileDialog.getSaveFileName(self, f"Save file from {from_user}", filename)
+                
+                if save_path:
+                    with open(save_path, 'wb') as f:
+                        f.write(file_data)
+                    QMessageBox.information(self, "Success", f"File saved!")
+                    self.log_activity(f"📥 Downloaded {filename} from {from_user}")
+            except Exception as e:
+                QMessageBox.critical(self, "Error", str(e))
+    
+    def handle_file_available(self, message):
+        from_user = message.get('from', 'Unknown')
+        filename = message.get('filename', 'file')
+        file_size = message.get('size', 0)
+        size_mb = file_size / (1024 * 1024)
+        
+        # Log to activity
+        self.log_activity(f"📁 {from_user} shared {filename} ({size_mb:.2f} MB)")
+        
+        # Show download dialog
+        reply = QMessageBox.question(
+            self,
+            "📁 File Available",
+            f"{from_user} shared: {filename}\n\nSize: {size_mb:.2f} MB\n\nDownload now?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes
+        )
+        
+        if reply == QMessageBox.StandardButton.Yes:
+            # Request download from server
+            download_msg = json.dumps({
+                'type': 'file_download',
+                'filename': filename
+            })
+            try:
+                self.tcp_socket.send(download_msg.encode('utf-8'))
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Could not request file: {e}")
     
     def closeEvent(self, event):
         self.running = False

@@ -1755,27 +1755,18 @@ class ConferenceClient(QMainWindow):
         from_user = message.get('from', 'Unknown')
         filename = message.get('filename', 'file')
         
-        # Show accept/reject dialog first
-        reply = QMessageBox.question(
-            self, 
-            "📁 File Transfer", 
-            f"{from_user} wants to send you: {filename}\n\nDo you want to accept this file?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.Yes
-        )
-        
-        if reply == QMessageBox.StandardButton.Yes:
-            try:
-                file_data = base64.b64decode(message['data'])
-                save_path, _ = QFileDialog.getSaveFileName(self, f"Save file from {from_user}", filename)
-                
-                if save_path:
-                    with open(save_path, 'wb') as f:
-                        f.write(file_data)
-                    QMessageBox.information(self, "Success", f"File saved!")
-                    self.log_activity(f"📥 Downloaded {filename} from {from_user}")
-            except Exception as e:
-                QMessageBox.critical(self, "Error", str(e))
+        # Auto-accept and show save dialog
+        try:
+            file_data = base64.b64decode(message['data'])
+            save_path, _ = QFileDialog.getSaveFileName(self, f"Save file from {from_user}", filename)
+            
+            if save_path:
+                with open(save_path, 'wb') as f:
+                    f.write(file_data)
+                QMessageBox.information(self, "Success", f"File saved!")
+                self.log_activity(f"📥 Downloaded {filename} from {from_user}")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", str(e))
     
     def handle_file_available(self, message):
         from_user = message.get('from', 'Unknown')

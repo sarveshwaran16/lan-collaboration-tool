@@ -410,6 +410,18 @@ class ConferenceServer:
         self.broadcast_participant_update()
             
     def stop(self):
+        # Notify all clients that the server is shutting down
+        shutdown_msg = json.dumps({'type': 'server_shutdown'}).encode('utf-8')
+        with self.lock:
+            for client_socket in list(self.clients.keys()):
+                try:
+                    client_socket.send(shutdown_msg)
+                except:
+                    pass
+        
+        # Give clients a moment to receive the message
+        time.sleep(0.5)
+        
         self.running = False
         with self.lock:
             for client_socket in list(self.clients.keys()):

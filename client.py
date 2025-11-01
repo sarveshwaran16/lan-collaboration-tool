@@ -37,6 +37,7 @@ class ConferenceClient(QMainWindow):
     chat_message_signal = pyqtSignal(dict)
     file_transfer_signal = pyqtSignal(dict)
     file_available_signal = pyqtSignal(dict)
+    server_shutdown_signal = pyqtSignal()
     
     def __init__(self, server_host, server_port, username):
         super().__init__()
@@ -82,6 +83,7 @@ class ConferenceClient(QMainWindow):
         self.chat_message_signal.connect(self.handle_chat_message)
         self.file_transfer_signal.connect(self.handle_file_transfer)
         self.file_available_signal.connect(self.handle_file_available)
+        self.server_shutdown_signal.connect(self.handle_server_shutdown)
         
         self.setup_gui()
         
@@ -570,6 +572,9 @@ class ConferenceClient(QMainWindow):
                                 self.tcp_socket.send(json.dumps({'type': 'pong'}).encode('utf-8'))
                             except Exception:
                                 pass
+                        elif msg_type == 'server_shutdown':
+                            self.server_shutdown_signal.emit()
+                            break
                         elif msg_type == 'screen_share':
                             action = message.get('action')
                             username = message.get('username')
@@ -1796,6 +1801,22 @@ class ConferenceClient(QMainWindow):
                 self.tcp_socket.send(download_msg.encode('utf-8'))
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Could not request file: {e}")
+    
+    def handle_server_shutdown(self):
+        """Handle server shutdown notification"""
+        # Stop running flag
+        self.running = False
+        
+        # Show notification to user
+        QMessageBox.warning(
+            self,
+            "🚫 Server Disconnected",
+            "The server has stopped.\n\nYou will be disconnected now.",
+            QMessageBox.StandardButton.Ok
+        )
+        
+        # Close the application
+        self.close()
     
     def closeEvent(self, event):
         self.running = False

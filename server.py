@@ -22,6 +22,9 @@ class ConferenceServer:
         # File storage: {filename: {'data': bytes, 'size': int, 'uploaded_by': str}}
         self.files = {}
         
+        # Track who is currently screen sharing (only one at a time)
+        self.current_presenter = None
+        
     def start(self):
         self.tcp_socket.bind(('0.0.0.0', self.tcp_port))
         self.tcp_socket.listen(10)
@@ -193,15 +196,38 @@ class ConferenceServer:
         
         action = message.get('action')
         
-        if action in ['start', 'stop']:
-            print(f"Screen share {action} from {sender_username}")
+        if action == 'start':
+            # Check if someone else is already presenting
+            if self.current_presenter is not None and self.current_presenter != sender_username:
+                # Reject - someone else is already sharing
+                print(f"Screen share REJECTED for {sender_username} - {self.current_presenter} is presenting")
+                rejection = json.dumps({
+                    'type': 'screen_share',
+                    'action': 'rejected',
+                    'current_presenter': self.current_presenter
+                }).encode('utf-8')
+                try:
+                    sender_socket.send(rejection)
+                except:
+                    pass
+                return
+            
+            # Allow screen share
+            self.current_presenter = sender_username
+            print(f"Screen share START from {sender_username}")
             data = json.dumps(message).encode('utf-8')
-            # Broadcast over TCP for higher reliability and larger frames
+            self.broadcast_screen_share_tcp(data, sender_username)
+        
+        elif action == 'stop':
+            if self.current_presenter == sender_username:
+                self.current_presenter = None
+            print(f"Screen share STOP from {sender_username}")
+            data = json.dumps(message).encode('utf-8')
             self.broadcast_screen_share_tcp(data, sender_username)
         
         elif action == 'frame':
+            # Broadcast all frames (no filtering)
             data = json.dumps(message).encode('utf-8')
-            # Broadcast frames over TCP
             self.broadcast_screen_share_tcp(data, sender_username)
             
     def send_participant_list(self, client_socket):
@@ -401,6 +427,11 @@ class ConferenceServer:
             
             if username and username in self.username_to_udp:
                 del self.username_to_udp[username]
+            
+            # Clear presenter if they disconnected
+            if self.current_presenter == username:
+                self.current_presenter = None
+                print(f"Screen share ended - {username} disconnected")
         
         try:
             client_socket.close()

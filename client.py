@@ -34,6 +34,7 @@ class ConferenceClient(QMainWindow):
     screen_share_start_signal = pyqtSignal(str)
     screen_share_stop_signal = pyqtSignal()
     screen_share_frame_signal = pyqtSignal(object)
+    screen_share_rejected_signal = pyqtSignal(str)
     chat_message_signal = pyqtSignal(dict)
     file_transfer_signal = pyqtSignal(dict)
     file_available_signal = pyqtSignal(dict)
@@ -80,6 +81,7 @@ class ConferenceClient(QMainWindow):
         self.screen_share_start_signal.connect(self.handle_screen_share_start)
         self.screen_share_stop_signal.connect(self.handle_screen_share_stop)
         self.screen_share_frame_signal.connect(self.update_screen_share_display)
+        self.screen_share_rejected_signal.connect(self.handle_screen_share_rejected)
         self.chat_message_signal.connect(self.handle_chat_message)
         self.file_transfer_signal.connect(self.handle_file_transfer)
         self.file_available_signal.connect(self.handle_file_available)
@@ -585,6 +587,9 @@ class ConferenceClient(QMainWindow):
                                 self.screen_share_stop_signal.emit()
                             elif action == 'frame':
                                 self.handle_screen_share_frame(message)
+                            elif action == 'rejected':
+                                presenter = message.get('current_presenter', 'another user')
+                                self.screen_share_rejected_signal.emit(presenter)
                             
                     except json.JSONDecodeError:
                         break
@@ -684,17 +689,22 @@ class ConferenceClient(QMainWindow):
     def update_participant_list(self, participants):
         current_usernames = set(p['username'] for p in participants)
         
-        # Detect joins
+        # Detect joins and leaves
+        participants_changed = False
         for username in current_usernames:
             if username not in self.previous_participants and username != self.username:
                 self.log_activity(f"👤 {username} joined")
+                participants_changed = True
         
-        # Detect leaves
         for username in self.previous_participants:
             if username not in current_usernames and username != self.username:
                 self.log_activity(f"👋 {username} left")
+                participants_changed = True
         
         self.previous_participants = current_usernames.copy()
+        
+        # Track if only status changed (not participant count)
+        status_only_change = not participants_changed
         
         for p in participants:
             username = p['username']
@@ -731,7 +741,12 @@ class ConferenceClient(QMainWindow):
             self.participant_list.addItem(f"{username} {status}")
         
         if not (self.screen_share_active and self.current_page == 0):
-            self.update_video_display()
+            # Only rebuild grid if participants joined/left, otherwise just update status
+            if participants_changed:
+                self.update_video_display()
+            else:
+                # Only update status indicators (mic icons) without rebuilding grid
+                self.update_participant_status_only()
     
     def clear_user_video(self, username):
         try:
@@ -741,6 +756,23 @@ class ConferenceClient(QMainWindow):
                 video_label.setText(username)
         except Exception as e:
             pass
+    
+    def update_participant_status_only(self):
+        """Update only the status indicators (mic icons) and clear video if turned off, without rebuilding the grid"""
+        for username in self.participants.keys():
+            if username in self.video_labels:
+                participant_data = self.participants[username]
+                
+                # Update mic status
+                mic_status = "🎤" if participant_data['audio'] else "🔇"
+                mic_label = self.video_labels[username]['mic_label']
+                mic_label.setText(mic_status)
+                
+                # Clear video frame if video is off
+                if not participant_data['video']:
+                    video_label = self.video_labels[username]['video_label']
+                    video_label.setPixmap(QPixmap())
+                    video_label.setText(username)
     
     def update_video_display(self):
         while self.video_layout.count():
@@ -752,6 +784,9 @@ class ConferenceClient(QMainWindow):
         
         self.video_labels.clear()
         QApplication.processEvents()
+        for i in range(4):
+            self.video_layout.setRowStretch(i, 0)
+            self.video_layout.setColumnStretch(i, 0)
         
         participant_list = list(self.participants.keys())
         total_participants = len(participant_list)
@@ -794,6 +829,11 @@ class ConferenceClient(QMainWindow):
         for i in range(cols):
             self.video_layout.setColumnStretch(i, 1)
         
+        # Calculate cell size based on video_frame dimensions to prevent grid expansion
+        frame_size = self.video_frame.size()
+        cell_width = (frame_size.width() - 20) // cols  # Account for margins and spacing
+        cell_height = (frame_size.height() - 20) // rows
+        
         for idx, username in enumerate(page_participants):
             row = idx // cols
             col = idx % cols
@@ -805,7 +845,8 @@ class ConferenceClient(QMainWindow):
                 border: 2px solid #667eea;
                 border-radius: 8px;
             """)
-            cell_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+            # Lock cell size to prevent expansion when video loads
+            cell_widget.setFixedSize(cell_width, cell_height)
             
             cell_layout = QVBoxLayout(cell_widget)
             cell_layout.setContentsMargins(2, 2, 2, 2)
@@ -819,6 +860,9 @@ class ConferenceClient(QMainWindow):
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
                     stop:0 #1a1a2e, stop:1 #16213e);
             """)
+            # Ensure video label doesn't expand beyond cell size
+            video_label.setMinimumSize(1, 1)
+            video_label.setMaximumSize(16777215, 16777215)  # Qt's QWIDGETSIZE_MAX
             cell_layout.addWidget(video_label, stretch=1)
             
             info_widget = QWidget()
@@ -1007,6 +1051,44 @@ class ConferenceClient(QMainWindow):
         if username and username != self.username:
             self.log_activity(f"🖥️ {username} stopped screen sharing")
         self.hide_screen_share()
+    
+    def handle_screen_share_rejected(self, presenter):
+        """Handle rejection when trying to share while someone else is presenting"""
+        # Reset state
+        self.screen_share_enabled = False
+        self.screen_share_active = False
+        
+        # Reset button
+        self.screen_btn.setText("🖥️ Share Screen")
+        self.screen_btn.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #f2994a, stop:1 #f2c94c);
+                color: white;
+                border: none;
+                border-radius: 10px;
+                padding: 12px;
+                font-weight: bold;
+                font-size: 11px;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #f2c94c, stop:1 #f2994a);
+            }
+            QPushButton:pressed {
+                background: #d6843f;
+            }
+        """)
+        
+        # Show dialog
+        QMessageBox.warning(
+            self,
+            "Screen Share Not Available",
+            f"{presenter} is currently sharing their screen.\n\nOnly one user can share their screen at a time."
+        )
+        
+        # Log
+        self.log_activity(f"⚠️ Screen share unavailable - {presenter} is presenting")
     
     def prev_page(self):
         if self.current_page > 0:
@@ -1670,13 +1752,7 @@ class ConferenceClient(QMainWindow):
         if not filepath:
             return
         
-        try:
-            import os
-            if os.path.getsize(filepath) > 10 * 1024 * 1024:
-                QMessageBox.warning(self, "Warning", "File too large! Max 10MB")
-                return
-        except:
-            pass
+        import os
         
         file_dialog = QDialog(self)
         file_dialog.setWindowTitle("Share File")

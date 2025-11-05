@@ -377,6 +377,30 @@ class ConferenceClient(QMainWindow):
         """)
         control_layout.addWidget(self.file_btn)
         
+        # Leave button
+        self.leave_btn = QPushButton("🚪 Leave")
+        self.leave_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.leave_btn.setToolTip("Leave the conference")
+        self.leave_btn.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #eb3349, stop:1 #f45c43);
+                color: white;
+                border: none;
+                border-radius: 10px;
+                padding: 12px;
+                font-weight: bold;
+                font-size: 11px;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #f45c43, stop:1 #eb3349);
+            }
+            QPushButton:pressed { background: #d32f2f; }
+        """)
+        self.leave_btn.clicked.connect(self.confirm_and_leave)
+        control_layout.addWidget(self.leave_btn)
+        
         left_layout.addWidget(control_widget)
         
         main_layout.addWidget(left_widget, stretch=4)
@@ -496,6 +520,50 @@ class ConferenceClient(QMainWindow):
         # Fallback
         fallback = cv2.resize(frame_bgr, (640, 360))
         ok, buffer = cv2.imencode('.jpg', fallback, [cv2.IMWRITE_JPEG_QUALITY, 50])
+        b64 = base64.b64encode(buffer).decode('utf-8')
+        return fallback, b64
+
+    def _encode_screen_frame_for_tcp(self, frame_bgr, target_max_bytes=300000):
+        """Encode a screen frame for TCP relay using adaptive resolution/quality to maximize
+        visual fidelity while keeping payload size bounded for low latency.
+
+        Returns (resized_bgr_frame, base64_jpeg)
+        """
+        # Prefer higher resolutions first, then step down
+        candidate_resolutions = [
+            (1920, 1080), (1728, 972), (1600, 900), (1536, 864), (1366, 768), (1280, 720)
+        ]
+        # Try higher qualities first
+        candidate_qualities = [90, 85, 80, 75, 70]
+
+        # Build optional encoding flags for better compression at same quality
+        encode_flags_base = []
+        try:
+            if hasattr(cv2, 'IMWRITE_JPEG_OPTIMIZE'):
+                encode_flags_base += [cv2.IMWRITE_JPEG_OPTIMIZE, 1]
+            if hasattr(cv2, 'IMWRITE_JPEG_PROGRESSIVE'):
+                encode_flags_base += [cv2.IMWRITE_JPEG_PROGRESSIVE, 1]
+        except Exception:
+            pass
+
+        height, width = frame_bgr.shape[:2]
+        # Keep aspect ratio when resizing to target resolution
+        for target_w, target_h in candidate_resolutions:
+            # Skip upscaling to avoid wasted bytes
+            if width < target_w or height < target_h:
+                target_w, target_h = width, height
+            resized = cv2.resize(frame_bgr, (target_w, target_h))
+            for quality in candidate_qualities:
+                flags = [cv2.IMWRITE_JPEG_QUALITY, quality] + encode_flags_base
+                ok, buffer = cv2.imencode('.jpg', resized, flags)
+                if not ok:
+                    continue
+                b64 = base64.b64encode(buffer).decode('utf-8')
+                if len(b64) <= target_max_bytes:
+                    return resized, b64
+        # Fallback: smaller size/quality
+        fallback = cv2.resize(frame_bgr, (1280, 720)) if (width >= 1280 and height >= 720) else frame_bgr
+        ok, buffer = cv2.imencode('.jpg', fallback, [cv2.IMWRITE_JPEG_QUALITY, 70])
         b64 = base64.b64encode(buffer).decode('utf-8')
         return fallback, b64
 
@@ -730,6 +798,10 @@ class ConferenceClient(QMainWindow):
         # Track if only status changed (not participant count)
         status_only_change = not participants_changed
         
+        # If the current presenter is gone, force-stop viewing screen share
+        if self.screen_share_active and self.screen_share_user and self.screen_share_user not in current_usernames:
+            self.handle_screen_share_stop()
+
         # Ensure initial render when first user (self) joins
         if not participants_changed and self.video_layout.count() == 0 and len(current_usernames) > 0:
             participants_changed = True
@@ -853,6 +925,7 @@ class ConferenceClient(QMainWindow):
             rows, cols = 2, 2
         
         for i in range(rows):
+            
             self.video_layout.setRowStretch(i, 1)
         for i in range(cols):
             self.video_layout.setColumnStretch(i, 1)
@@ -1474,6 +1547,76 @@ class ConferenceClient(QMainWindow):
                 """
             )
     
+    def confirm_and_leave(self):
+        reply = QMessageBox.question(
+            self,
+            "Leave Conference",
+            "Do you really want to leave the conference?",
+            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel
+        )
+        if reply == QMessageBox.StandardButton.Ok:
+            self.leave_conference()
+
+    def _cleanup_and_disconnect(self):
+        # Best-effort status update; server will also detect socket close
+        try:
+            if self.tcp_socket:
+                self.tcp_socket.send(json.dumps({'type': 'status_update', 'video': False, 'audio': False}).encode('utf-8'))
+        except Exception:
+            pass
+        self.running = False
+        # Stop media
+        try:
+            if self.cap:
+                self.cap.release()
+                self.cap = None
+        except Exception:
+            pass
+        try:
+            if self.stream_in:
+                self.stream_in.stop_stream()
+                self.stream_in.close()
+                self.stream_in = None
+            if self.audio_in:
+                self.audio_in.terminate()
+                self.audio_in = None
+        except Exception:
+            pass
+        try:
+            if self.stream_out:
+                self.stream_out.stop_stream()
+                self.stream_out.close()
+                self.stream_out = None
+            if self.audio_out:
+                self.audio_out.terminate()
+                self.audio_out = None
+        except Exception:
+            pass
+        # Close sockets so server removes us and broadcasts update
+        try:
+            if self.tcp_socket:
+                try:
+                    self.tcp_socket.shutdown(socket.SHUT_RDWR)
+                except Exception:
+                    pass
+                self.tcp_socket.close()
+                self.tcp_socket = None
+        except Exception:
+            pass
+        try:
+            if self.udp_socket:
+                self.udp_socket.close()
+                self.udp_socket = None
+        except Exception:
+            pass
+
+    def leave_conference(self):
+        try:
+            self._cleanup_and_disconnect()
+        finally:
+            self.close()
+
     def send_video(self):
         while self.video_enabled and self.running:
             try:
@@ -1553,16 +1696,14 @@ class ConferenceClient(QMainWindow):
                             screenshot = ImageGrab.grab()
                             frame = np.array(screenshot)
                             frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-                            # Higher quality for TCP relay
-                            frame = cv2.resize(frame, (1280, 720))
-                            display_frame = frame.copy()
+                            # Adaptive encode for high quality under size cap
+                            display_frame, b64 = self._encode_screen_frame_for_tcp(frame, target_max_bytes=320000)
                             self.shared_screen_frame = display_frame
 
                             if self.current_page == 0:
                                 self.screen_share_frame_signal.emit(display_frame)
 
-                            _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
-                            frame_data = base64.b64encode(buffer).decode('utf-8')
+                            frame_data = b64
                             
                             message = json.dumps({
                                 'type': 'screen_share',
@@ -1582,6 +1723,7 @@ class ConferenceClient(QMainWindow):
                                 print(f"[ERROR] TCP send failed: {e}")
                                 break
                             
+                            # ~10 fps target; encoder adapts quality to stay within size
                             time.sleep(0.1)
                             
                         except Exception as e:
@@ -1617,15 +1759,13 @@ class ConferenceClient(QMainWindow):
                             screenshot = sct.grab(monitor)
                             frame = np.array(screenshot)
                             frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
-                            # Higher quality for TCP relay
-                            frame = cv2.resize(frame, (1280, 720))
-
-                            self.shared_screen_frame = frame.copy()
+                            # Adaptive encode for high quality under size cap
+                            display_frame, b64 = self._encode_screen_frame_for_tcp(frame, target_max_bytes=320000)
+                            self.shared_screen_frame = display_frame.copy()
                             if self.current_page == 0:
-                                self.screen_share_frame_signal.emit(frame.copy())
+                                self.screen_share_frame_signal.emit(display_frame.copy())
 
-                            _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
-                            frame_data = base64.b64encode(buffer).decode('utf-8')
+                            frame_data = b64
                             
                             message = json.dumps({
                                 'type': 'screen_share',
@@ -1645,6 +1785,7 @@ class ConferenceClient(QMainWindow):
                                 print(f"[ERROR] TCP send failed: {e}")
                                 break
                             
+                            # ~10 fps target; encoder adapts quality to stay within size
                             time.sleep(0.1)
                             
                         except Exception as e:
@@ -1966,44 +2107,23 @@ class ConferenceClient(QMainWindow):
         self.close()
     
     def closeEvent(self, event):
-        self.running = False
-        
-        if self.cap:
-            self.cap.release()
-        if self.stream_in:
-            try:
-                self.stream_in.stop_stream()
-                self.stream_in.close()
-            except:
-                pass
-        if self.audio_in:
-            try:
-                self.audio_in.terminate()
-            except:
-                pass
-        if self.stream_out:
-            try:
-                self.stream_out.stop_stream()
-                self.stream_out.close()
-            except:
-                pass
-        if self.audio_out:
-            try:
-                self.audio_out.terminate()
-            except:
-                pass
-        if self.tcp_socket:
-            try:
-                self.tcp_socket.close()
-            except:
-                pass
-        if self.udp_socket:
-            try:
-                self.udp_socket.close()
-            except:
-                pass
-        
-        cv2.destroyAllWindows()
+        # Ask confirmation on window close
+        reply = QMessageBox.question(
+            self,
+            "Leave Conference",
+            "Do you really want to leave the conference?",
+            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel
+        )
+        if reply != QMessageBox.StandardButton.Ok:
+            event.ignore()
+            return
+        # Cleanup and allow window to close
+        self._cleanup_and_disconnect()
+        try:
+            cv2.destroyAllWindows()
+        except Exception:
+            pass
         event.accept()
 
 class LoginDialog(QDialog):

@@ -14,6 +14,16 @@ from mss import mss
 import sys
 import os
 
+# Client application for LAN collaboration.
+#
+# Requirements mapping:
+# - Multi-User Video (UDP): captures webcam via OpenCV, JPEG-compresses frames, sends via UDP to server; renders others' frames in a grid.
+# - Multi-User Audio (UDP): captures microphone via PyAudio, base64-encodes PCM chunks, sends via UDP; plays back received audio.
+# - Screen Sharing (TCP): captures screen (mss/ImageGrab), JPEG-compresses images, streams via TCP; displays presenter's frames.
+# - Group Chat (TCP): sends/receives reliable text messages over TCP; maintains on-client chat history.
+# - File Sharing (TCP): uploads file data to server over TCP; downloads on demand; shows basic progress via dialogs/logs.
+# - Session/UI: PyQt6 GUI organizes all functions; TCP control channel manages status, participant list, and presenter state.
+
 class VideoLabel(QLabel):
     """Custom label for video display with modern styling"""
     def __init__(self):
@@ -500,6 +510,7 @@ class ConferenceClient(QMainWindow):
         """)
         
     def _encode_frame_for_udp(self, frame_bgr, max_bytes=50000):
+        # Video: compress a camera frame to fit within one UDP datagram for low latency delivery
         """Return (resized_bgr_frame, base64_jpeg) maximizing quality under UDP datagram size.
         Tries higher resolutions and qualities first, backing off until size fits.
         """
@@ -524,6 +535,7 @@ class ConferenceClient(QMainWindow):
         return fallback, b64
 
     def _encode_screen_frame_for_tcp(self, frame_bgr, target_max_bytes=300000):
+        # Screen share: compress a desktop frame for TCP streaming to retain fidelity and reliability
         """Encode a screen frame for TCP relay using adaptive resolution/quality to maximize
         visual fidelity while keeping payload size bounded for low latency.
 
@@ -568,6 +580,7 @@ class ConferenceClient(QMainWindow):
         return fallback, b64
 
     def connect(self):
+        # Establish the reliable TCP control channel to the server and register a UDP endpoint for media
         try:
             self.tcp_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             try:
@@ -648,6 +661,7 @@ class ConferenceClient(QMainWindow):
             return False
             
     def receive_tcp(self):
+        # Reliable control-plane receiver (TCP): chat, participant list, screen-share control, file transfer
         buffer = ""
         while self.running:
             try:
@@ -703,6 +717,7 @@ class ConferenceClient(QMainWindow):
                 break
     
     def receive_udp(self):
+        # Low-latency media-plane receiver (UDP): inbound video frames and audio chunks, plus screen frames when relayed via UDP
         while self.running:
             try:
                 data, addr = self.udp_socket.recvfrom(131072)
@@ -732,6 +747,7 @@ class ConferenceClient(QMainWindow):
                     print(f"UDP error: {e}")
     
     def handle_video_frame(self, message):
+        # Render another participant's video frame (received over UDP)
         username = message.get('username')
         if username and username in self.participants:
             try:
@@ -743,6 +759,7 @@ class ConferenceClient(QMainWindow):
                 print(f"Video frame error: {e}")
             
     def handle_audio_frame(self, message):
+        # Play back mixed/relayed audio chunk (currently server relays individual frames; playback is per-client)
         try:
             audio_data = base64.b64decode(message['audio'])
 
@@ -1041,6 +1058,7 @@ class ConferenceClient(QMainWindow):
                 pass
     
     def display_screen_share(self):
+        # UI layout to show the presenter's screen in a dedicated area as required
         while self.video_layout.count():
             item = self.video_layout.takeAt(0)
             if item.widget():
@@ -1144,6 +1162,7 @@ class ConferenceClient(QMainWindow):
         self.update_video_display()
     
     def handle_screen_share_start(self, username):
+        # Presenter role activated: show start of screen sharing from the specified user
         self.screen_share_active = True
         self.screen_share_user = username
         self.current_page = 0
@@ -1153,6 +1172,7 @@ class ConferenceClient(QMainWindow):
         self.display_screen_share()
     
     def handle_screen_share_stop(self):
+        # Presenter role ended: hide screen sharing and revert to video grid
         username = self.screen_share_user
         self.screen_share_active = False
         self.screen_share_user = None
@@ -1201,6 +1221,7 @@ class ConferenceClient(QMainWindow):
         self.log_activity(f"⚠️ Screen share unavailable - {presenter} is presenting")
     
     def prev_page(self):
+        # UI navigation for paginated video grid to display multiple participants simultaneously
         if self.current_page > 0:
             self.current_page -= 1
             if self.screen_share_active and self.current_page == 0:
@@ -1209,6 +1230,7 @@ class ConferenceClient(QMainWindow):
                 self.update_video_display()
     
     def next_page(self):
+        # UI navigation for paginated video grid (forward)
         if self.screen_share_active:
             total_pages = 1 + max(1, (len(self.participants) - 1) // self.participants_per_page + 1)
         else:
@@ -1219,6 +1241,7 @@ class ConferenceClient(QMainWindow):
             self.update_video_display()
     
     def toggle_video(self):
+        # Start/stop local camera capture and notify server of status over TCP
         if not self.video_enabled:
             try:
                 import platform
@@ -1332,6 +1355,7 @@ class ConferenceClient(QMainWindow):
                 video_label.setText(self.username)
     
     def toggle_audio(self):
+        # Start/stop local microphone capture and notify server of status over TCP
         if not self.audio_enabled:
             try:
                 self.audio_in = pyaudio.PyAudio()
@@ -1442,6 +1466,7 @@ class ConferenceClient(QMainWindow):
                 pass
     
     def toggle_screen_share(self):
+        # Start/stop acting as presenter; stream screen frames via TCP; server enforces single presenter
         if not self.screen_share_enabled:
             self.screen_share_enabled = True
             self.screen_btn.setText("🖥️ Stop Sharing")
@@ -1571,6 +1596,7 @@ class ConferenceClient(QMainWindow):
             self.leave_conference()
 
     def _cleanup_and_disconnect(self):
+        # Graceful session teardown: stop media, close sockets so server can update session state
         # Best-effort status update; server will also detect socket close
         try:
             if self.tcp_socket:
@@ -1630,6 +1656,7 @@ class ConferenceClient(QMainWindow):
             self.close()
 
     def send_video(self):
+        # Video capture & transmission (UDP): capture webcam frames, compress to JPEG, send to server
         while self.video_enabled and self.running:
             try:
                 ret, frame = self.cap.read()
@@ -1657,6 +1684,7 @@ class ConferenceClient(QMainWindow):
                 continue
     
     def send_audio(self):
+        # Audio capture & transmission (UDP): read PCM frames from microphone and send to server
         while self.audio_enabled and self.running:
             try:
                 data = self.stream_in.read(512, exception_on_overflow=False)
@@ -1690,6 +1718,7 @@ class ConferenceClient(QMainWindow):
                 break
     
     def send_screen_share(self):
+        # Screen & slide sharing (TCP): capture desktop frames, JPEG-compress, and stream reliably to server
         try:
             import platform
             system = platform.system()
@@ -1817,6 +1846,7 @@ class ConferenceClient(QMainWindow):
             self.screen_share_enabled = False
     
     def open_chat(self):
+        # Group text chat UI: send messages reliably over TCP to everyone or a selected recipient
         chat_dialog = QDialog(self)
         chat_dialog.setWindowTitle("💬 Chat")
         chat_dialog.setGeometry(200, 200, 500, 600)
@@ -1950,6 +1980,7 @@ class ConferenceClient(QMainWindow):
         chat_dialog.exec()
     
     def handle_chat_message(self, message):
+        # Display incoming chat message (broadcast or private) received over TCP
         from_user = message.get('from', 'Unknown')
         msg_text = message.get('message', '')
         recipient = message.get('recipient', 'everyone')
@@ -1972,6 +2003,7 @@ class ConferenceClient(QMainWindow):
                 pass
     
     def open_file_transfer(self):
+        # File sharing: select a local file and upload its data to the server via TCP with recipient metadata
         filepath, _ = QFileDialog.getOpenFileName(self, "Select file")
         if not filepath:
             return
@@ -2057,6 +2089,7 @@ class ConferenceClient(QMainWindow):
         file_dialog.exec()
     
     def handle_file_transfer(self, message):
+        # File download: receive a file's data from server over TCP and save locally
         from_user = message.get('from', 'Unknown')
         filename = message.get('filename', 'file')
         
@@ -2074,6 +2107,7 @@ class ConferenceClient(QMainWindow):
             QMessageBox.critical(self, "Error", str(e))
     
     def handle_file_available(self, message):
+        # File availability notice: prompt user to download; if accepted, request transfer over TCP
         from_user = message.get('from', 'Unknown')
         filename = message.get('filename', 'file')
         file_size = message.get('size', 0)

@@ -11,6 +11,17 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QObject
 from PyQt6.QtGui import QFont, QColor
 
+# Server application for LAN collaboration.
+#
+# Requirements mapping:
+# - Central server manages sessions and relays data between clients over TCP/UDP.
+# - Video/Audio (UDP): receives per-client media frames and broadcasts to all other clients for low latency.
+#   Note: current implementation relays audio frames; server-side mixing into a single stream is not implemented.
+# - Screen Sharing (TCP): enforces single presenter; relays presenter's frames reliably over TCP to other clients.
+# - Group Chat (TCP): routes chat messages (broadcast or private) over reliable TCP.
+# - File Sharing (TCP): stores uploaded file data and serves downloads upon client requests.
+# - Session Management: tracks participants, their media status, and presenter; gracefully handles joins/leaves.
+
 class ServerSignals(QObject):
     """Signals for thread-safe GUI updates"""
     log_message = pyqtSignal(str)
@@ -64,6 +75,7 @@ class ConferenceServer:
             self.signals.participant_update.emit(participants)
         
     def start(self):
+        # Bind TCP (control) and UDP (media) sockets and accept incoming client connections
         self.tcp_socket.bind(('0.0.0.0', self.tcp_port))
         self.tcp_socket.listen(10)
         
@@ -87,6 +99,7 @@ class ConferenceServer:
                     self.emit_log(f"Error accepting TCP connection: {e}")
     
     def handle_udp(self):
+        # Media-plane handler (UDP): register sender's UDP address and broadcast inbound video/audio to others
         while self.running:
             try:
                 data, addr = self.udp_socket.recvfrom(131072)
@@ -108,6 +121,7 @@ class ConferenceServer:
                     self.emit_log(f"UDP error: {e}")
     
     def broadcast_udp_exclude_sender(self, data, sender_addr, sender_username):
+        # Broadcast a UDP datagram to all participants except the original sender
         with self.lock:
             for username, udp_addr in list(self.username_to_udp.items()):
                 if username != sender_username:
@@ -117,6 +131,7 @@ class ConferenceServer:
                         self.emit_log(f"Error sending UDP to {username}: {e}")
     
     def broadcast_screen_share_udp(self, data, sender_username):
+        # (Optional path) Broadcast screen frames via UDP to non-sender clients (not used by current TCP screen flow)
         with self.lock:
             for username, udp_addr in list(self.username_to_udp.items()):
                 if username != sender_username:
@@ -126,6 +141,7 @@ class ConferenceServer:
                         self.emit_log(f"Error sending screen share UDP to {username}: {e}")
 
     def broadcast_screen_share_tcp(self, data, sender_username):
+        # Relay screen-sharing control/frames over TCP reliably to all except the presenter
         with self.lock:
             for client_socket, info in list(self.clients.items()):
                 if info.get('username') != sender_username:
@@ -135,6 +151,7 @@ class ConferenceServer:
                         self.emit_log(f"Error sending screen share TCP to {info.get('username')}: {e}")
                 
     def handle_tcp_client(self, client_socket, address):
+        # Control-plane per-client loop (TCP): login, participant list, chat, files, status, screen-sharing
         username = None
         try:
             client_socket.settimeout(60.0)
@@ -230,6 +247,7 @@ class ConferenceServer:
             self.emit_participant_update()
             
     def handle_screen_share(self, sender_socket, message):
+        # Enforce single presenter and relay screen-sharing events/frames to other clients over TCP
         with self.lock:
             sender_username = self.clients.get(sender_socket, {}).get('username', 'Unknown')
         
@@ -269,6 +287,7 @@ class ConferenceServer:
             self.broadcast_screen_share_tcp(data, sender_username)
             
     def send_participant_list(self, client_socket):
+        # Send current participant roster and media status to a single client (TCP)
         participants = []
         with self.lock:
             for sock, info in self.clients.items():
@@ -289,6 +308,7 @@ class ConferenceServer:
             pass
             
     def broadcast_participant_update(self):
+        # Broadcast the participant roster and media status to all clients (TCP)
         participants = []
         with self.lock:
             for sock, info in self.clients.items():
@@ -311,6 +331,7 @@ class ConferenceServer:
                     pass
                     
     def route_chat(self, sender_socket, message):
+        # Group/private chat routing over TCP; attaches timestamp and sender identity
         with self.lock:
             sender_username = self.clients.get(sender_socket, {}).get('username', 'Unknown')
         
@@ -348,6 +369,7 @@ class ConferenceServer:
                             self.emit_log(f"Error sending private chat: {e}")
                         
     def route_file(self, sender_socket, message):
+        # Forward a file transfer request/notification to target recipients (TCP)
         with self.lock:
             sender_username = self.clients.get(sender_socket, {}).get('username', 'Unknown')
         
@@ -373,6 +395,7 @@ class ConferenceServer:
                             pass
     
     def handle_file_upload(self, sender_socket, message):
+        # Receive and store an uploaded file from a client (TCP) and notify intended recipients
         import base64
         with self.lock:
             sender_username = self.clients.get(sender_socket, {}).get('username', 'Unknown')
@@ -420,6 +443,7 @@ class ConferenceServer:
             self.emit_log(f"Error handling file upload: {e}")
     
     def handle_file_download(self, requester_socket, message):
+        # Serve a previously uploaded file to a requesting client over TCP
         import base64
         filename = message.get('filename')
         
@@ -446,6 +470,7 @@ class ConferenceServer:
                 self.emit_log(f"File {filename} not found")
     
     def update_status(self, client_socket, message):
+        # Update per-client media status (video/audio) and broadcast updated roster
         with self.lock:
             if client_socket in self.clients:
                 if 'video' in message:
@@ -457,6 +482,7 @@ class ConferenceServer:
         self.emit_participant_update()
         
     def remove_client(self, client_socket, username):
+        # Cleanup on client disconnect: drop from rosters, clear presenter if needed, notify others
         with self.lock:
             if client_socket in self.clients:
                 self.emit_log(f"Client {username} disconnected")
@@ -478,6 +504,7 @@ class ConferenceServer:
         self.broadcast_participant_update()
             
     def stop(self):
+        # Graceful shutdown: notify clients, close sockets, and stop accepting media/control
         shutdown_msg = json.dumps({'type': 'server_shutdown'}).encode('utf-8')
         with self.lock:
             for client_socket in list(self.clients.keys()):

@@ -690,6 +690,77 @@ class ServerGUI(QMainWindow):
         
         log_group.setLayout(log_layout)
         main_layout.addWidget(log_group)
+
+        # Global styling aligned with client application
+        self.setStyleSheet(
+            """
+            QMainWindow {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                    stop:0 #0f2027, stop:0.5 #203a43, stop:1 #2c5364);
+            }
+            QGroupBox {
+                color: #e0e0e0;
+                font-weight: bold;
+                border: 2px solid rgba(255,255,255,0.08);
+                border-radius: 8px;
+                margin-top: 12px;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 6px;
+                color: #b3c7ff;
+                background: transparent;
+            }
+            QLabel { color: #ffffff; }
+            QLineEdit {
+                background: rgba(255,255,255,0.12);
+                color: #ffffff;
+                border: 2px solid rgba(102, 126, 234, 0.45);
+                border-radius: 8px;
+                padding: 8px;
+                selection-background-color: #667eea;
+            }
+            QLineEdit:read-only {
+                background: rgba(255,255,255,0.09);
+            }
+            QTextEdit {
+                background: rgba(255,255,255,0.10);
+                color: #d0d0d0;
+                border: 2px solid rgba(255,255,255,0.12);
+                border-radius: 8px;
+                padding: 8px;
+            }
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #667eea, stop:1 #764ba2);
+                color: white;
+                border: none;
+                border-radius: 10px;
+                padding: 10px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #764ba2, stop:1 #667eea);
+            }
+            QPushButton:pressed { background: #5a4b8a; }
+            QTableWidget {
+                background: rgba(255,255,255,0.06);
+                color: #e8e8e8;
+                gridline-color: rgba(255,255,255,0.08);
+                border: 2px solid rgba(255,255,255,0.12);
+                border-radius: 8px;
+            }
+            QHeaderView::section {
+                background: rgba(102, 126, 234, 0.25);
+                color: white;
+                padding: 6px;
+                border: none;
+            }
+            QStatusBar { color: #f0f0f0; }
+            """
+        )
         
     def toggle_server(self):
         if self.server is None or not self.server.running:
@@ -819,6 +890,22 @@ if __name__ == "__main__":
     
     # Set application style
     app.setStyle('Fusion')
+    from PyQt6.QtGui import QPalette
+    palette = QPalette()
+    palette.setColor(QPalette.ColorRole.Window, QColor(53, 53, 53))
+    palette.setColor(QPalette.ColorRole.WindowText, Qt.GlobalColor.white)
+    palette.setColor(QPalette.ColorRole.Base, QColor(35, 35, 35))
+    palette.setColor(QPalette.ColorRole.AlternateBase, QColor(53, 53, 53))
+    palette.setColor(QPalette.ColorRole.ToolTipBase, QColor(25, 25, 25))
+    palette.setColor(QPalette.ColorRole.ToolTipText, Qt.GlobalColor.white)
+    palette.setColor(QPalette.ColorRole.Text, Qt.GlobalColor.white)
+    palette.setColor(QPalette.ColorRole.Button, QColor(53, 53, 53))
+    palette.setColor(QPalette.ColorRole.ButtonText, Qt.GlobalColor.white)
+    palette.setColor(QPalette.ColorRole.BrightText, Qt.GlobalColor.red)
+    palette.setColor(QPalette.ColorRole.Link, QColor(102, 126, 234))
+    palette.setColor(QPalette.ColorRole.Highlight, QColor(102, 126, 234))
+    palette.setColor(QPalette.ColorRole.HighlightedText, Qt.GlobalColor.black)
+    app.setPalette(palette)
     
     window = ServerGUI()
     window.show()

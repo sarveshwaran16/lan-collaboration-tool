@@ -75,6 +75,7 @@ class ConferenceClient(QMainWindow):
         self.screen_share_label = None
         self.screen_share_info = None
         self.presenter_overlay = None
+        self.mirror_video = False
         
         self.participant_list_signal.connect(self.update_participant_list)
         self.video_frame_signal.connect(self.update_video_frame)
@@ -278,6 +279,29 @@ class ConferenceClient(QMainWindow):
         """)
         control_layout.addWidget(self.audio_btn)
         
+        self.mirror_btn = QPushButton("🔁 Mirror: Off")
+        self.mirror_btn.clicked.connect(self.toggle_mirror)
+        self.mirror_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.mirror_btn.setToolTip("Mirror your own camera preview (others see normal)")
+        self.mirror_btn.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #8E2DE2, stop:1 #4A00E0);
+                color: white;
+                border: none;
+                border-radius: 10px;
+                padding: 12px;
+                font-weight: bold;
+                font-size: 11px;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #4A00E0, stop:1 #8E2DE2);
+            }
+            QPushButton:pressed { background: #5b2dbd; }
+        """)
+        control_layout.addWidget(self.mirror_btn)
+
         self.screen_btn = QPushButton("🖥️ Share Screen")
         self.screen_btn.clicked.connect(self.toggle_screen_share)
         self.screen_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -904,6 +928,9 @@ class ConferenceClient(QMainWindow):
     def update_video_frame(self, username, frame):
         if username in self.video_labels:
             try:
+                # Mirror only the local user's preview if enabled; do not affect others
+                if username == self.username and self.mirror_video:
+                    frame = cv2.flip(frame, 1)
                 frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 height, width, channel = frame_rgb.shape
                 bytes_per_line = 3 * width
@@ -1401,6 +1428,51 @@ class ConferenceClient(QMainWindow):
             self.shared_screen_frame = None
             self.current_page = 0
             self.hide_screen_share()
+    
+    def toggle_mirror(self):
+        self.mirror_video = not self.mirror_video
+        if self.mirror_video:
+            self.mirror_btn.setText("🔁 Mirror: On")
+            self.mirror_btn.setStyleSheet(
+                """
+                QPushButton {
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                        stop:0 #43cea2, stop:1 #185a9d);
+                    color: white;
+                    border: none;
+                    border-radius: 10px;
+                    padding: 12px;
+                    font-weight: bold;
+                    font-size: 11px;
+                }
+                QPushButton:hover {
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                        stop:0 #185a9d, stop:1 #43cea2);
+                }
+                QPushButton:pressed { background: #2a6f8f; }
+                """
+            )
+        else:
+            self.mirror_btn.setText("🔁 Mirror: Off")
+            self.mirror_btn.setStyleSheet(
+                """
+                QPushButton {
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                        stop:0 #8E2DE2, stop:1 #4A00E0);
+                    color: white;
+                    border: none;
+                    border-radius: 10px;
+                    padding: 12px;
+                    font-weight: bold;
+                    font-size: 11px;
+                }
+                QPushButton:hover {
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                        stop:0 #4A00E0, stop:1 #8E2DE2);
+                }
+                QPushButton:pressed { background: #5b2dbd; }
+                """
+            )
     
     def send_video(self):
         while self.video_enabled and self.running:

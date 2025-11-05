@@ -7,7 +7,7 @@ from datetime import timedelta
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                              QHBoxLayout, QPushButton, QLabel, QLineEdit, 
                              QTextEdit, QTableWidget, QTableWidgetItem, QGroupBox,
-                             QSpinBox, QGridLayout)
+                             QGridLayout)
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QObject
 from PyQt6.QtGui import QFont, QColor
 
@@ -508,6 +508,11 @@ class ServerGUI(QMainWindow):
         self.server_thread = None
         self.signals = ServerSignals()
         self.start_time = None
+        self.total_connections_since_start = 0
+        self.peak_concurrent_connections = 0
+        self.previous_participant_count = 0
+        self.DEFAULT_TCP_PORT = 5555
+        self.DEFAULT_UDP_PORT = 5556
         
         self.init_ui()
         
@@ -556,19 +561,17 @@ class ServerGUI(QMainWindow):
         self.ip_input.setMinimumWidth(150)
         control_layout.addWidget(self.ip_input, 0, 1)
         
-        # TCP Port
+        # TCP Port (fixed)
         control_layout.addWidget(QLabel("TCP Port:"), 0, 2)
-        self.tcp_port_input = QSpinBox()
-        self.tcp_port_input.setRange(1024, 65535)
-        self.tcp_port_input.setValue(5555)
-        control_layout.addWidget(self.tcp_port_input, 0, 3)
+        self.tcp_port_value = QLabel(str(self.DEFAULT_TCP_PORT))
+        self.tcp_port_value.setStyleSheet("font-weight: bold;")
+        control_layout.addWidget(self.tcp_port_value, 0, 3)
         
-        # UDP Port
+        # UDP Port (fixed)
         control_layout.addWidget(QLabel("UDP Port:"), 0, 4)
-        self.udp_port_input = QSpinBox()
-        self.udp_port_input.setRange(1024, 65535)
-        self.udp_port_input.setValue(5556)
-        control_layout.addWidget(self.udp_port_input, 0, 5)
+        self.udp_port_value = QLabel(str(self.DEFAULT_UDP_PORT))
+        self.udp_port_value.setStyleSheet("font-weight: bold;")
+        control_layout.addWidget(self.udp_port_value, 0, 5)
         
         # Start/Stop button
         self.start_stop_btn = QPushButton("Start Server")
@@ -598,11 +601,44 @@ class ServerGUI(QMainWindow):
         self.uptime_label = QLabel("Uptime: 00:00:00")
         self.uptime_label.setStyleSheet("font-weight: bold;")
         status_layout.addWidget(self.uptime_label)
+
+        status_layout.addWidget(QLabel(" | "))
+
+        self.peak_label = QLabel("Peak: 0")
+        status_layout.addWidget(self.peak_label)
+
+        status_layout.addWidget(QLabel(" | "))
+
+        self.total_conn_label = QLabel("Total connections: 0")
+        status_layout.addWidget(self.total_conn_label)
         
         status_layout.addStretch()
         status_group.setLayout(status_layout)
         main_layout.addWidget(status_group)
         
+        # Server Info group
+        info_group = QGroupBox("Server Info")
+        info_layout = QGridLayout()
+        
+        info_layout.addWidget(QLabel("Hostname:"), 0, 0)
+        self.hostname_value = QLabel(socket.gethostname())
+        info_layout.addWidget(self.hostname_value, 0, 1)
+        
+        info_layout.addWidget(QLabel("Current Presenter:"), 0, 2)
+        self.presenter_value = QLabel("None")
+        info_layout.addWidget(self.presenter_value, 0, 3)
+
+        info_layout.addWidget(QLabel("Connection Info:"), 1, 0)
+        self.connection_info_value = QLabel(f"IP {self.ip_input.text()} | TCP {self.DEFAULT_TCP_PORT} | UDP {self.DEFAULT_UDP_PORT}")
+        info_layout.addWidget(self.connection_info_value, 1, 1, 1, 2)
+        
+        self.copy_conn_btn = QPushButton("Copy")
+        self.copy_conn_btn.clicked.connect(self.copy_connection_info)
+        info_layout.addWidget(self.copy_conn_btn, 1, 3)
+
+        info_group.setLayout(info_layout)
+        main_layout.addWidget(info_group)
+
         # Middle section - Participants and Activity
         middle_layout = QHBoxLayout()
         
@@ -662,8 +698,8 @@ class ServerGUI(QMainWindow):
             self.stop_server()
     
     def start_server(self):
-        tcp_port = self.tcp_port_input.value()
-        udp_port = self.udp_port_input.value()
+        tcp_port = self.DEFAULT_TCP_PORT
+        udp_port = self.DEFAULT_UDP_PORT
         
         try:
             self.server = ConferenceServer(tcp_port, udp_port, self.signals)
@@ -673,14 +709,18 @@ class ServerGUI(QMainWindow):
             
             self.start_time = time.time()
             self.uptime_timer.start(1000)
+            self.total_connections_since_start = 0
+            self.peak_concurrent_connections = 0
+            self.previous_participant_count = 0
+            self.peak_label.setText("Peak: 0")
+            self.total_conn_label.setText("Total connections: 0")
+            self.presenter_value.setText("None")
+            self.connection_info_value.setText(f"IP {self.ip_input.text()} | TCP {tcp_port} | UDP {udp_port}")
             
             self.start_stop_btn.setText("Stop Server")
             self.start_stop_btn.setStyleSheet("QPushButton { background-color: #f44336; color: white; font-weight: bold; padding: 10px; }")
             self.status_label.setText("Status: RUNNING")
             self.status_label.setStyleSheet("font-weight: bold; color: green;")
-            
-            self.tcp_port_input.setEnabled(False)
-            self.udp_port_input.setEnabled(False)
             
             self.add_log("✓ Server started successfully")
             
@@ -700,12 +740,12 @@ class ServerGUI(QMainWindow):
             self.status_label.setText("Status: STOPPED")
             self.status_label.setStyleSheet("font-weight: bold; color: red;")
             
-            self.tcp_port_input.setEnabled(True)
-            self.udp_port_input.setEnabled(True)
-            
             self.participants_table.setRowCount(0)
             self.participants_label.setText("Participants: 0")
             self.uptime_label.setText("Uptime: 00:00:00")
+            self.peak_label.setText("Peak: 0")
+            self.total_conn_label.setText("Total connections: 0")
+            self.presenter_value.setText("None")
             
             self.add_log("✓ Server stopped")
     
@@ -718,6 +758,16 @@ class ServerGUI(QMainWindow):
         timestamp = time.strftime("%H:%M:%S")
         self.activity_log.append(f"[{timestamp}] {message}")
         self.activity_log.verticalScrollBar().setValue(self.activity_log.verticalScrollBar().maximum())
+        # Lightweight presenter tracking based on activity messages
+        try:
+            if "Screen share started:" in message:
+                who = message.split(":", 1)[1].strip()
+                if who:
+                    self.presenter_value.setText(who)
+            elif "Screen share stopped:" in message or "Screen share ended:" in message:
+                self.presenter_value.setText("None")
+        except Exception:
+            pass
     
     def update_participants(self, participants):
         self.participants_table.setRowCount(len(participants))
@@ -735,7 +785,16 @@ class ServerGUI(QMainWindow):
             audio_item.setForeground(QColor("green") if p['audio'] else QColor("red"))
             self.participants_table.setItem(i, 2, audio_item)
         
-        self.participants_label.setText(f"Participants: {len(participants)}")
+        current_count = len(participants)
+        # Update totals/peaks
+        if current_count > self.previous_participant_count:
+            self.total_connections_since_start += (current_count - self.previous_participant_count)
+            self.total_conn_label.setText(f"Total connections: {self.total_connections_since_start}")
+        if current_count > self.peak_concurrent_connections:
+            self.peak_concurrent_connections = current_count
+            self.peak_label.setText(f"Peak: {self.peak_concurrent_connections}")
+        self.previous_participant_count = current_count
+        self.participants_label.setText(f"Participants: {current_count}")
     
     def update_uptime(self):
         if self.start_time:
@@ -746,6 +805,10 @@ class ServerGUI(QMainWindow):
     def update_status_bar(self, message):
         self.statusBar().showMessage(message, 3000)
     
+    def copy_connection_info(self):
+        clipboard = QApplication.clipboard()
+        clipboard.setText(f"IP {self.ip_input.text()} | TCP {self.DEFAULT_TCP_PORT} | UDP {self.DEFAULT_UDP_PORT}")
+
     def closeEvent(self, event):
         if self.server and self.server.running:
             self.stop_server()

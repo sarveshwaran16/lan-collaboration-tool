@@ -706,6 +706,10 @@ class ConferenceClient(QMainWindow):
         # Track if only status changed (not participant count)
         status_only_change = not participants_changed
         
+        # Ensure initial render when first user (self) joins
+        if not participants_changed and self.video_layout.count() == 0 and len(current_usernames) > 0:
+            participants_changed = True
+        
         for p in participants:
             username = p['username']
             if username not in self.participants:
@@ -829,11 +833,6 @@ class ConferenceClient(QMainWindow):
         for i in range(cols):
             self.video_layout.setColumnStretch(i, 1)
         
-        # Calculate cell size based on video_frame dimensions to prevent grid expansion
-        frame_size = self.video_frame.size()
-        cell_width = (frame_size.width() - 20) // cols  # Account for margins and spacing
-        cell_height = (frame_size.height() - 20) // rows
-        
         for idx, username in enumerate(page_participants):
             row = idx // cols
             col = idx % cols
@@ -845,8 +844,8 @@ class ConferenceClient(QMainWindow):
                 border: 2px solid #667eea;
                 border-radius: 8px;
             """)
-            # Lock cell size to prevent expansion when video loads
-            cell_widget.setFixedSize(cell_width, cell_height)
+            # Allow cells to grow and fill the grid area
+            cell_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
             
             cell_layout = QVBoxLayout(cell_widget)
             cell_layout.setContentsMargins(2, 2, 2, 2)
@@ -1940,8 +1939,8 @@ class LoginDialog(QDialog):
         super().__init__()
         self.setWindowTitle("🎥 Join Conference")
         # Open at an optimal medium size so all text fields are clearly visible
-        self.resize(700, 520)
-        self.setMinimumSize(500, 380)
+        self.resize(520, 360)
+        self.setMinimumSize(420, 300)
         self.setSizeGripEnabled(True)
         self.result_data = None
         self.setStyleSheet("""
@@ -1966,7 +1965,8 @@ class LoginDialog(QDialog):
         """)
         
         layout = QVBoxLayout(self)
-        layout.setSpacing(15)
+        layout.setSpacing(10)
+        layout.setContentsMargins(20, 20, 20, 20)
         
         title = QLabel("🎥 Conference Login")
         title.setStyleSheet("""
@@ -1977,20 +1977,25 @@ class LoginDialog(QDialog):
         """)
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(title)
-        
-        layout.addWidget(QLabel("🌐 Server IP:"))
+
+        # Centered, compact form container
+        form_container = QWidget()
+        form_container.setMaximumWidth(480)
+        form_layout = QFormLayout(form_container)
+        form_layout.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        form_layout.setFormAlignment(Qt.AlignmentFlag.AlignHCenter)
+        form_layout.setHorizontalSpacing(12)
+        form_layout.setVerticalSpacing(10)
+
         self.server_entry = QLineEdit("127.0.0.1")
-        layout.addWidget(self.server_entry)
-        
-        layout.addWidget(QLabel("🔌 Server Port:"))
-        self.port_entry = QLineEdit("5555")
-        layout.addWidget(self.port_entry)
-        
-        layout.addWidget(QLabel("👤 Username:"))
         self.username_entry = QLineEdit()
         self.username_entry.setPlaceholderText("Enter your name...")
         self.username_entry.returnPressed.connect(self.connect)
-        layout.addWidget(self.username_entry)
+
+        form_layout.addRow(QLabel("🌐 Server IP:"), self.server_entry)
+        form_layout.addRow(QLabel("👤 Username:"), self.username_entry)
+
+        layout.addWidget(form_container, 0, Qt.AlignmentFlag.AlignHCenter)
         
         connect_btn = QPushButton("🚀 Connect")
         connect_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -2016,18 +2021,22 @@ class LoginDialog(QDialog):
         """)
         connect_btn.clicked.connect(self.connect)
         layout.addWidget(connect_btn)
+        
+        # Focus username for quicker entry
+        QTimer.singleShot(0, self.username_entry.setFocus)
+        
+        # Fit window to content while keeping a compact floor size
+        self.adjustSize()
+        hint = self.sizeHint()
+        self.setFixedSize(max(hint.width(), 520), max(hint.height(), 340))
     
     def connect(self):
         server = self.server_entry.text().strip()
-        port = self.port_entry.text().strip()
         username = self.username_entry.text().strip()
         
-        if server and port and username:
-            try:
-                self.result_data = {'server': server, 'port': int(port), 'username': username}
-                self.accept()
-            except ValueError:
-                QMessageBox.critical(self, "Error", "Invalid port")
+        if server and username:
+            self.result_data = {'server': server, 'username': username}
+            self.accept()
         else:
             QMessageBox.warning(self, "Warning", "Fill all fields")
 
@@ -2053,9 +2062,10 @@ def main():
     
     login = LoginDialog()
     if login.exec() == QDialog.DialogCode.Accepted and login.result_data:
+        DEFAULT_TCP_PORT = 5555
         client = ConferenceClient(
             login.result_data['server'],
-            login.result_data['port'],
+            DEFAULT_TCP_PORT,
             login.result_data['username']
         )
         

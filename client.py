@@ -588,7 +588,17 @@ class ConferenceClient(QMainWindow):
             self.udp_port = msg.get('udp_port', 5556)
             
             self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            self.udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 2097152)
+            # Larger buffers to accommodate bursty media while keeping latency low
+            try:
+                self.udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 * 1024 * 1024)
+                self.udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4 * 1024 * 1024)
+            except Exception:
+                pass
+            # Hint low delay (may be ignored by OS)
+            try:
+                self.udp_socket.setsockopt(socket.IPPROTO_IP, socket.IP_TOS, 0x10)
+            except Exception:
+                pass
             self.udp_socket.bind(('', 0))
             
             register_msg = json.dumps({'type': 'register', 'username': self.username})
@@ -622,7 +632,8 @@ class ConferenceClient(QMainWindow):
                 channels=1,
                 rate=16000,
                 output=True,
-                frames_per_buffer=2048
+                # Smaller buffer to reduce playback latency (~32ms at 16kHz)
+                frames_per_buffer=512
             )
             return True
         except Exception as e:
@@ -1331,7 +1342,8 @@ class ConferenceClient(QMainWindow):
                         channels=1,
                         rate=16000,
                         input=True,
-                        frames_per_buffer=2048
+                        # Smaller capture buffer to reduce capture latency
+                        frames_per_buffer=512
                     )
                 except OSError as e:
                     print(f"Default audio device failed: {e}")
@@ -1343,7 +1355,7 @@ class ConferenceClient(QMainWindow):
                                 channels=1,
                                 rate=16000,
                                 input=True,
-                                frames_per_buffer=2048,
+                                frames_per_buffer=512,
                                 input_device_index=i
                             )
                             print(f"Using audio device {i}")
@@ -1625,11 +1637,10 @@ class ConferenceClient(QMainWindow):
                     time.sleep(0.1)
                     continue
                 
-                frame = cv2.resize(frame, (320, 240))
-                self.participants[self.username]['frame'] = frame
-                
-                _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 50])
-                frame_data = base64.b64encode(buffer).decode('utf-8')
+                # Adaptive encode for UDP: maximize quality within a tight size budget to keep latency low
+                resized_frame, frame_b64 = self._encode_frame_for_udp(frame, max_bytes=50000)
+                self.participants[self.username]['frame'] = resized_frame
+                frame_data = frame_b64
                 
                 message = json.dumps({
                     'type': 'video_frame',
@@ -1638,7 +1649,7 @@ class ConferenceClient(QMainWindow):
                 })
                 
                 self.udp_socket.sendto(message.encode('utf-8'), (self.server_host, self.udp_port))
-                self.video_frame_signal.emit(self.username, frame)
+                self.video_frame_signal.emit(self.username, resized_frame)
                 
                 time.sleep(0.033)
             except Exception as e:
@@ -1648,7 +1659,7 @@ class ConferenceClient(QMainWindow):
     def send_audio(self):
         while self.audio_enabled and self.running:
             try:
-                data = self.stream_in.read(2048, exception_on_overflow=False)
+                data = self.stream_in.read(512, exception_on_overflow=False)
                 audio_data = base64.b64encode(data).decode('utf-8')
                 
                 message = json.dumps({
@@ -1658,7 +1669,8 @@ class ConferenceClient(QMainWindow):
                 })
                 
                 self.udp_socket.sendto(message.encode('utf-8'), (self.server_host, self.udp_port))
-                time.sleep(0.05)
+                # With smaller buffers, little to no sleep keeps latency low; the read pace throttles us
+                time.sleep(0.01)
             except Exception as e:
                 print(f"Audio capture/send error: {e}")
                 self.audio_enabled = False
@@ -1723,8 +1735,8 @@ class ConferenceClient(QMainWindow):
                                 print(f"[ERROR] TCP send failed: {e}")
                                 break
                             
-                            # ~10 fps target; encoder adapts quality to stay within size
-                            time.sleep(0.1)
+                            # Slightly higher frame rate for lower latency while keeping size adaptive
+                            time.sleep(0.06)
                             
                         except Exception as e:
                             print(f"[ERROR] PIL screen capture error: {e}")
@@ -1785,8 +1797,8 @@ class ConferenceClient(QMainWindow):
                                 print(f"[ERROR] TCP send failed: {e}")
                                 break
                             
-                            # ~10 fps target; encoder adapts quality to stay within size
-                            time.sleep(0.1)
+                            # Slightly higher frame rate for lower latency while keeping size adaptive
+                            time.sleep(0.06)
                             
                         except Exception as e:
                             print(f"[ERROR] Screen share error: {e}")
